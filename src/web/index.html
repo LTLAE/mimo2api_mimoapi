@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiMo Proxy 管理面板</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
+.layout{display:flex;height:100vh}
+.sidebar{width:220px;background:#1a1d27;padding:20px 0;flex-shrink:0;display:flex;flex-direction:column}
+.sidebar h1{font-size:16px;font-weight:700;color:#7c86ff;padding:0 20px 20px;border-bottom:1px solid #2d3148}
+.nav-item{padding:10px 20px;cursor:pointer;color:#94a3b8;font-size:14px;transition:all .2s;border-left:3px solid transparent}
+.nav-item:hover,.nav-item.active{background:#242840;color:#e2e8f0;border-left-color:#7c86ff}
+.main{flex:1;overflow-y:auto;padding:24px}
+.page{display:none}.page.active{display:block}
+.card{background:#1a1d27;border:1px solid #2d3148;border-radius:12px;padding:20px;margin-bottom:16px}
+.card h2{font-size:15px;font-weight:600;margin-bottom:16px;color:#c8d0f0}
+.btn{padding:8px 16px;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:all .2s}
+.btn-primary{background:#7c86ff;color:#fff}.btn-primary:hover{background:#6671e8}
+.btn-danger{background:#e55;color:#fff}.btn-danger:hover{background:#c33}
+.btn-success{background:#22c55e;color:#fff}.btn-success:hover{background:#16a34a}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-ghost{background:transparent;border:1px solid #2d3148;color:#94a3b8}.btn-ghost:hover{border-color:#7c86ff;color:#7c86ff}
+input,textarea,select{background:#0f1117;border:1px solid #2d3148;border-radius:8px;padding:8px 12px;color:#e2e8f0;font-size:13px;width:100%}
+input:focus,textarea:focus,select:focus{outline:none;border-color:#7c86ff}
+textarea{resize:vertical;min-height:80px}
+.form-group{margin-bottom:12px}
+.form-group label{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}
+.table{width:100%;border-collapse:collapse;font-size:13px}
+.table th{text-align:left;padding:10px 12px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3148}
+.table td{padding:10px 12px;border-bottom:1px solid #1e2235}
+.table tr:hover td{background:#1e2235}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:500}
+.badge-green{background:#14532d;color:#4ade80}
+.badge-red{background:#450a0a;color:#f87171}
+.badge-yellow{background:#422006;color:#fbbf24}
+.badge-blue{background:#1e3a5f;color:#60a5fa}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.stat-card{background:#1a1d27;border:1px solid #2d3148;border-radius:10px;padding:16px;text-align:center}
+.stat-value{font-size:28px;font-weight:700;color:#7c86ff}
+.stat-label{font-size:12px;color:#64748b;margin-top:4px}
+.flex{display:flex;gap:8px;align-items:center}
+.flex-1{flex:1}
+.mt-8{margin-top:8px}
+.alert{padding:10px 14px;border-radius:8px;font-size:13px;margin-bottom:12px}
+.alert-success{background:#14532d33;border:1px solid #14532d;color:#4ade80}
+.alert-error{background:#450a0a33;border:1px solid #450a0a;color:#f87171}
+#toast{position:fixed;bottom:20px;right:20px;z-index:999;pointer-events:none}
+.toast-item{background:#1a1d27;border:1px solid #2d3148;border-radius:8px;padding:12px 16px;margin-top:8px;font-size:13px;animation:slideIn .3s ease}
+@keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:none;opacity:1}}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.dot-green{background:#4ade80}.dot-red{background:#f87171}
+.log-filter{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.pagination{display:flex;gap:4px;margin-top:12px;justify-content:center}
+.page-btn{padding:4px 10px;border:1px solid #2d3148;background:#1a1d27;color:#94a3b8;border-radius:6px;cursor:pointer;font-size:12px}
+.page-btn.active,.page-btn:hover{border-color:#7c86ff;color:#7c86ff}
+.ws-indicator{font-size:11px;color:#64748b;margin-top:auto;padding:12px 20px}
+</style>
+</head>
+<body>
+<div id="toast"></div>
+<div class="layout">
+  <div class="sidebar">
+    <h1>MiMo Proxy</h1>
+    <div class="nav-item active" onclick="showPage('accounts')">账号管理</div>
+    <div class="nav-item" onclick="showPage('monitor')">实时监控</div>
+    <div class="nav-item" onclick="showPage('stats')">Token 统计</div>
+    <div class="nav-item" onclick="showPage('logs')">请求日志</div>
+    <div class="nav-item" onclick="showPage('sessions')">会话管理</div>
+    <div class="ws-indicator" id="wsStatus">● 检测中...</div>
+  </div>
+  <div class="main">
+
+    <!-- 账号管理 -->
+    <div class="page active" id="page-accounts">
+      <div class="card">
+        <h2>添加账号</h2>
+        <div class="form-group">
+          <label>别名（可选）</label>
+          <input id="addAlias" placeholder="如：账号1">
+        </div>
+        <div class="form-group">
+          <label>粘贴 cURL 命令（自动解析凭证）</label>
+          <textarea id="addCurl" placeholder="curl 'https://aistudio.xiaomimimo.com/open-apis/bot/chat?...' -H 'Cookie: ...' ..."></textarea>
+        </div>
+        <div class="flex mt-8">
+          <button class="btn btn-primary" onclick="addAccount()">添加账号</button>
+          <span style="font-size:12px;color:#64748b;margin-left:8px">或直接填写：</span>
+          <button class="btn btn-ghost btn-sm" onclick="toggleManual()">手动填写</button>
+        </div>
+        <div id="manualForm" style="display:none;margin-top:12px">
+          <div class="form-group"><label>serviceToken</label><input id="mST" placeholder="serviceToken"></div>
+          <div class="form-group"><label>userId</label><input id="mUID" placeholder="userId"></div>
+          <div class="form-group"><label>xiaomichatbot_ph</label><input id="mPH" placeholder="xiaomichatbot_ph"></div>
+          <button class="btn btn-primary btn-sm" onclick="addAccountManual()">添加</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>账号列表</h2>
+        <table class="table">
+          <thead><tr><th>别名</th><th>API Key</th><th>状态</th><th>并发</th><th>操作</th></tr></thead>
+          <tbody id="accountTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 实时监控 -->
+    <div class="page" id="page-monitor">
+      <div class="stat-grid" id="monitorStats"></div>
+      <div class="card">
+        <h2>各账号并发状态</h2>
+        <table class="table">
+          <thead><tr><th>别名</th><th>API Key</th><th>活跃请求</th><th>状态</th></tr></thead>
+          <tbody id="monitorTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Token 统计 -->
+    <div class="page" id="page-stats">
+      <div class="stat-grid" id="statsGrid"></div>
+      <div class="card">
+        <h2>各账号 Token 用量</h2>
+        <table class="table">
+          <thead><tr><th>别名</th><th>总请求</th><th>Prompt Tokens</th><th>Completion Tokens</th></tr></thead>
+          <tbody id="statsTable"></tbody>
+        </table>
+      </div>
+      <div class="card"><h2>近期用量趋势</h2><canvas id="tokenChart" height="80"></canvas></div>
+    </div>
+
+    <!-- 请求日志 -->
+    <div class="page" id="page-logs">
+      <div class="card">
+        <div class="log-filter">
+          <select id="logStatus" style="width:120px" onchange="loadLogs(1)">
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="error">失败</option>
+          </select>
+          <select id="logEndpoint" style="width:120px" onchange="loadLogs(1)">
+            <option value="">全部端点</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" onclick="loadLogs(1)">刷新</button>
+        </div>
+        <table class="table">
+          <thead><tr><th>时间</th><th>端点</th><th>模型</th><th>Prompt</th><th>Completion</th><th>耗时</th><th>状态</th></tr></thead>
+          <tbody id="logTable"></tbody>
+        </table>
+        <div class="pagination" id="logPagination"></div>
+      </div>
+    </div>
+
+    <!-- 会话管理 -->
+    <div class="page" id="page-sessions">
+      <div class="card">
+        <div class="flex" style="margin-bottom:12px">
+          <button class="btn btn-ghost btn-sm" onclick="loadSessions()">刷新</button>
+        </div>
+        <table class="table">
+          <thead><tr><th>会话ID</th><th>账号</th><th>客户端Key</th><th>累计Token</th><th>最后使用</th><th>操作</th></tr></thead>
+          <tbody id="sessionTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+<script>
+const ADMIN_KEY = localStorage.getItem('adminKey') || prompt('请输入 Admin Key:') || '';
+if (ADMIN_KEY) localStorage.setItem('adminKey', ADMIN_KEY);
+const api = (path, opts={}) => fetch(path, {...opts, headers:{'Content-Type':'application/json','X-Admin-Key':ADMIN_KEY,...(opts.headers||{})}, body:opts.body?JSON.stringify(opts.body):undefined}).then(r=>r.json());
+function toast(msg,ok=true){const el=document.createElement('div');el.className='toast-item';el.style.color=ok?'#4ade80':'#f87171';el.textContent=msg;document.getElementById('toast').appendChild(el);setTimeout(()=>el.remove(),3000);}
+let monitorTimer=null;
+function showPage(name){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('page-'+name).classList.add('active');event.currentTarget.classList.add('active');clearInterval(monitorTimer);if(name==='monitor'){loadMonitor();monitorTimer=setInterval(loadMonitor,3000);}else{({accounts:loadAccounts,stats:loadStats,logs:()=>loadLogs(1),sessions:loadSessions})[name]?.();}}
+async function loadAccounts(){const data=await api('/admin/accounts');document.getElementById('accountTable').innerHTML=data.map(a=>`<tr><td>${a.alias||'-'}</td><td><code style="font-size:11px;color:#7c86ff">${a.api_key}</code></td><td><span class="badge ${a.is_active?'badge-green':'badge-red'}">${a.is_active?'启用':'禁用'}</span></td><td>${a.active_requests}</td><td class="flex"><button class="btn btn-ghost btn-sm" onclick="testAccount('${a.id}')">测试</button><button class="btn btn-ghost btn-sm" onclick="toggleAccount('${a.id}',${a.is_active})">${a.is_active?'禁用':'启用'}</button><button class="btn btn-danger btn-sm" onclick="removeAccount('${a.id}')">删除</button></td></tr>`).join('');}
+async function addAccount(){const curl=document.getElementById('addCurl').value.trim(),alias=document.getElementById('addAlias').value.trim();if(!curl){toast('请粘贴 cURL 命令',false);return;}const res=await api('/admin/accounts',{method:'POST',body:{curl,alias}});res.api_key?toast('添加成功，API Key: '+res.api_key):toast(res.error||'添加失败',false);if(res.api_key)loadAccounts();}
+function toggleManual(){const f=document.getElementById('manualForm');f.style.display=f.style.display==='none'?'block':'none';}
+async function addAccountManual(){const body={service_token:document.getElementById('mST').value.trim(),user_id:document.getElementById('mUID').value.trim(),ph_token:document.getElementById('mPH').value.trim(),alias:document.getElementById('addAlias').value.trim()};if(!body.service_token){toast('serviceToken不能为空',false);return;}const res=await api('/admin/accounts',{method:'POST',body});res.api_key?toast('添加成功: '+res.api_key):toast(res.error||'失败',false);if(res.api_key)loadAccounts();}
+async function testAccount(id){toast('测试中...');const res=await api('/admin/accounts/test',{method:'POST',body:{id}});res.success?toast('有效: '+res.response.slice(0,80)):toast('无效: '+res.error,false);}
+async function toggleAccount(id,cur){await api('/admin/accounts/'+id,{method:'PATCH',body:{is_active:cur?0:1}});loadAccounts();}
+async function removeAccount(id){if(!confirm('确认删除？'))return;await api('/admin/accounts/'+id,{method:'DELETE'});toast('已删除');loadAccounts();}
+async function loadMonitor(){const s=await api('/admin/stats');const accs=s.accounts||[];const totalActive=accs.reduce((x,a)=>x+a.active_requests,0);const totalReqs=accs.reduce((x,a)=>x+a.total_requests,0);document.getElementById('monitorStats').innerHTML=`<div class="stat-card"><div class="stat-value">${accs.filter(a=>a.is_active).length}</div><div class="stat-label">活跃账号</div></div><div class="stat-card"><div class="stat-value">${totalActive}</div><div class="stat-label">当前并发</div></div><div class="stat-card"><div class="stat-value">${totalReqs}</div><div class="stat-label">总请求数</div></div>`;document.getElementById('monitorTable').innerHTML=accs.map(a=>`<tr><td>${a.alias||'-'}</td><td><code style="font-size:11px">${a.api_key.slice(0,20)}...</code></td><td>${a.active_requests}</td><td><span class="badge ${a.is_active?'badge-green':'badge-red'}">${a.is_active?'启用':'禁用'}</span></td></tr>`).join('');}
+let tokenChart=null;
+async function loadStats(){const s=await api('/admin/stats');const accs=s.accounts||[];const totalPT=accs.reduce((x,a)=>x+a.total_prompt_tokens,0);const totalCT=accs.reduce((x,a)=>x+a.total_completion_tokens,0);document.getElementById('statsGrid').innerHTML=`<div class="stat-card"><div class="stat-value">${totalPT.toLocaleString()}</div><div class="stat-label">Prompt Tokens</div></div><div class="stat-card"><div class="stat-value">${totalCT.toLocaleString()}</div><div class="stat-label">Completion Tokens</div></div><div class="stat-card"><div class="stat-value">${(totalPT+totalCT).toLocaleString()}</div><div class="stat-label">Total Tokens</div></div>`;document.getElementById('statsTable').innerHTML=accs.map(a=>`<tr><td>${a.alias||'-'}</td><td>${a.total_requests}</td><td>${(a.total_prompt_tokens||0).toLocaleString()}</td><td>${(a.total_completion_tokens||0).toLocaleString()}</td></tr>`).join('');const ctx=document.getElementById('tokenChart').getContext('2d');const labels=accs.map(a=>a.alias||a.api_key.slice(0,12));const ptData=accs.map(a=>a.total_prompt_tokens||0);const ctData=accs.map(a=>a.total_completion_tokens||0);if(tokenChart)tokenChart.destroy();tokenChart=new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Prompt Tokens',data:ptData,backgroundColor:'#7c86ff88'},{label:'Completion Tokens',data:ctData,backgroundColor:'#22c55e88'}]},options:{responsive:true,plugins:{legend:{labels:{color:'#94a3b8'}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}},y:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}}}}});}
+let logPage=1;
+async function loadLogs(page=1){logPage=page;const status=document.getElementById('logStatus').value;const endpoint=document.getElementById('logEndpoint').value;let url=`/admin/logs?page=${page}&limit=50`;if(status)url+=`&status=${status}`;if(endpoint)url+=`&endpoint=${endpoint}`;const d=await api(url);document.getElementById('logTable').innerHTML=(d.logs||[]).map(l=>`<tr><td style="font-size:11px">${l.created_at||''}</td><td><span class="badge badge-blue">${l.endpoint}</span></td><td>${l.model||'-'}</td><td>${l.prompt_tokens??'-'}</td><td>${l.completion_tokens??'-'}</td><td>${l.duration_ms??'-'}ms</td><td><span class="badge ${l.status==='success'?'badge-green':'badge-red'}">${l.status}</span>${l.error?`<span style="color:#f87171;font-size:11px;margin-left:4px">${l.error.slice(0,40)}</span>`:''}</td></tr>`).join('');const totalPages=Math.ceil((d.total||0)/50);const pg=document.getElementById('logPagination');pg.innerHTML=Array.from({length:Math.min(totalPages,10)},(_,i)=>`<button class="page-btn ${i+1===page?'active':''}" onclick="loadLogs(${i+1})">${i+1}</button>`).join('');}
+async function loadSessions(){const data=await api('/admin/sessions');document.getElementById('sessionTable').innerHTML=(data||[]).map(s=>`<tr><td style="font-size:11px">${s.id.slice(0,16)}...</td><td>${s.account_id.slice(0,12)}...</td><td>${s.client_session_id}</td><td>${(s.cumulative_prompt_tokens||0).toLocaleString()}</td><td style="font-size:11px">${s.last_used_at||''}</td><td><button class="btn btn-danger btn-sm" onclick="deleteSession('${s.id}')">删除</button></td></tr>`).join('');}
+async function deleteSession(id){if(!confirm('确认删除会话？'))return;await api('/admin/sessions/'+id,{method:'DELETE'});toast('已删除');loadSessions();}
+loadAccounts();
+
+// Health polling
+async function checkHealth(){try{const r=await fetch('/health');const el=document.getElementById('wsStatus');if(r.ok){el.textContent='● 已连接';el.style.color='#4ade80';}else{el.textContent='● 异常';el.style.color='#f87171';}}catch{const el=document.getElementById('wsStatus');el.textContent='● 断开';el.style.color='#f87171';}}
+checkHealth();
+setInterval(checkHealth, 5000);
+
+</script>
