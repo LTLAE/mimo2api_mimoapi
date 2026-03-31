@@ -11,6 +11,8 @@ import { db } from '../db.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
 import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
 import { toAnthropicToolUse } from '../tools/format.js';
+import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
+import { Account } from '../accounts.js';
 
 function logRequest(data: {
   account_id: string;
@@ -29,6 +31,28 @@ function logRequest(data: {
     data.usage?.reasoningTokens ?? null, data.duration_ms,
     data.status, data.error ?? null, new Date().toLocaleString('sv-SE')
   );
+}
+
+async function extractImagesAnthropic(account: Account, body: Record<string, unknown>): Promise<MimoMedia[]> {
+  const medias: MimoMedia[] = [];
+  const bodyMsgs = (body.messages as Array<{ role: string; content: unknown }>) ?? [];
+  for (const m of bodyMsgs) {
+    if (!Array.isArray(m.content)) continue;
+    const blocks = m.content as Array<{ type: string; source?: { type: string; media_type?: string; data?: string; url?: string } }>;
+    for (const b of blocks) {
+      if (b.type !== 'image' || !b.source) continue;
+      const src = b.source;
+      let imageUrl: string;
+      if (src.type === 'base64' && src.data && src.media_type) {
+        imageUrl = `data:${src.media_type};base64,${src.data}`;
+      } else if (src.type === 'url' && src.url) {
+        imageUrl = src.url;
+      } else continue;
+      const { data, mimeType } = await fetchImageBytes(imageUrl);
+      medias.push(await uploadImageToMimo(account, data, mimeType));
+    }
+  }
+  return medias;
 }
 
 function buildMessages(body: Record<string, unknown>): ChatMessage[] {
@@ -90,6 +114,8 @@ export function registerAnthropic(app: Hono) {
 
     const body = await c.req.json();
     console.log('[ANT] tools:', JSON.stringify(body.tools?.map((t: Record<string,unknown>) => t.name ?? t.function) ?? null));
+    const medias = await extractImagesAnthropic(account, body);
+    const mimoModel = (body.model && typeof body.model === 'string' && body.model.startsWith('mimo-')) ? body.model : 'mimo-v2-pro';
     const isStream: boolean = body.stream ?? false;
     const enableThinking: boolean = body.thinking?.type === 'enabled';
     const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
@@ -128,7 +154,7 @@ export function registerAnthropic(app: Hono) {
         query = serializeMessages(messages);
       }
 
-      const gen = callMimo(account, conversationId, query, enableThinking);
+      const gen = callMimo(account, conversationId, query, enableThinking, mimoModel, medias);
 
       if (isStream) {
         c.header('Content-Type', 'text/event-stream');

@@ -1,5 +1,6 @@
 import { Account } from '../accounts.js';
 import { v4 as uuidv4 } from 'uuid';
+import { MimoMedia } from './upload.js';
 
 export interface MimoUsage {
   promptTokens: number;
@@ -21,14 +22,15 @@ export async function* callMimo(
   conversationId: string,
   query: string,
   enableThinking: boolean,
-  model = 'mimo-v2-pro'
+  model = 'mimo-v2-pro',
+  multiMedias: MimoMedia[] = []
 ): AsyncGenerator<MimoChunk> {
   const body = {
     msgId: uuidv4().replace(/-/g, '').slice(0, 32),
     conversationId,
     query,
     modelConfig: { enableThinking, webSearchStatus: 'disabled', model },
-    multiMedias: [],
+    multiMedias,
   };
 
   const url = `${API_URL}?xiaomichatbot_ph=${encodeURIComponent(account.ph_token)}`;

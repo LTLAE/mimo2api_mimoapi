@@ -11,16 +11,13 @@ import { db } from '../db.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
 import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
 import { toOpenAIToolCalls } from '../tools/format.js';
+import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
+import { Account } from '../accounts.js';
 
 const MODEL_MAP: Record<string, string> = {
-  'gpt-4o': 'mimo-v2-pro',
-  'gpt-4': 'mimo-v2-pro',
-  'gpt-4-turbo': 'mimo-v2-pro',
-  'gpt-3.5-turbo': 'mimo-v2-pro',
-  'claude-3-5-sonnet': 'mimo-v2-pro',
-  'claude-3-opus': 'mimo-v2-pro',
   'mimo-v2-pro': 'mimo-v2-pro',
   'mimo-v2-flash-studio': 'mimo-v2-flash-studio',
+  'mimo-v2-omni': 'mimo-v2-omni',
 };
 
 function resolveModel(model: string): string {
@@ -41,6 +38,28 @@ function stripThink(text: string): string {
 function processThinkContent(text: string, mode: string): string {
   if (mode === 'strip') return stripThink(text);
   return text;
+}
+
+async function extractImages(account: Account, messages: Array<{ role: string; content: unknown }>): Promise<{ messages: Array<{ role: string; content: unknown }>; medias: MimoMedia[] }> {
+  const medias: MimoMedia[] = [];
+  const out = await Promise.all(messages.map(async (m) => {
+    if (!Array.isArray(m.content)) return m;
+    const blocks = m.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    const hasImage = blocks.some(b => b.type === 'image_url');
+    if (!hasImage) return m;
+    const textParts: string[] = [];
+    for (const b of blocks) {
+      if (b.type === 'text') {
+        textParts.push(b.text ?? '');
+      } else if (b.type === 'image_url' && b.image_url?.url) {
+        const { data, mimeType } = await fetchImageBytes(b.image_url.url);
+        const media = await uploadImageToMimo(account, data, mimeType);
+        medias.push(media);
+      }
+    }
+    return { role: m.role, content: textParts.join('\n') };
+  }));
+  return { messages: out, medias };
 }
 
 function logRequest(data: {
@@ -84,7 +103,8 @@ export function registerOpenAI(app: Hono) {
     }
 
     const body = await c.req.json();
-    const rawMessages: ChatMessage[] = body.messages ?? [];
+    const { messages: cleanedMsgs, medias } = await extractImages(account, body.messages ?? []);
+    const rawMessages: ChatMessage[] = cleanedMsgs as ChatMessage[];
     const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
     const isStream: boolean = body.stream ?? false;
     const enableThinking: boolean = !!body.reasoning_effort;
@@ -123,7 +143,7 @@ export function registerOpenAI(app: Hono) {
         query = serializeMessages(messages);
       }
 
-      const gen = callMimo(account, conversationId, query, enableThinking, mimoModel);
+      const gen = callMimo(account, conversationId, query, enableThinking, mimoModel, medias);
       const responseId = `chatcmpl-${uuidv4().replace(/-/g, '')}`;
       const created = Math.floor(Date.now() / 1000);
 
