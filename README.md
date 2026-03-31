@@ -6,6 +6,7 @@
 
 - 兼容 OpenAI `v1/chat/completions` 接口（支持流式 & 非流式）
 - 兼容 Anthropic `v1/messages` 接口（支持流式 & 非流式）
+- **图片理解**：支持 OpenAI `image_url` 和 Anthropic `image` 多模态内容块（自动上传至小米 OSS）
 - 多账号负载均衡，自动选择最空闲账号
 - 会话保持（Context Replay），减少 token 消耗
 - Tool Calling 支持（函数调用）
@@ -101,7 +102,27 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-支持的模型：`mimo-v2-pro`
+支持的模型：`mimo-v2-pro` / `mimo-v2-flash-studio` / `mimo-v2-omni`
+
+#### 图片理解（OpenAI 格式）
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <account-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mimo-v2-omni",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "这张图片是什么内容？"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+      ]
+    }]
+  }'
+```
+
+> 也支持 `data:image/png;base64,...` 格式的 base64 图片。
 
 ### Anthropic 兼容
 
@@ -110,9 +131,28 @@ curl http://localhost:8080/v1/messages \
   -H "x-api-key: <account-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "mimo-v2-pro",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+#### 图片理解（Anthropic 格式）
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: <account-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mimo-v2-omni",
+    "max_tokens": 1024,
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "<base64>"}},
+        {"type": "text", "text": "这张图片是什么内容？"}
+      ]
+    }]
   }'
 ```
 
