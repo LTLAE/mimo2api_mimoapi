@@ -53,12 +53,12 @@ function logRequest(data: {
 }) {
   db.prepare(
     `INSERT INTO request_logs (id, account_id, session_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
-     VALUES (?, ?, ?, 'openai', ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+     VALUES (?, ?, ?, 'openai', ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     uuidv4(), data.account_id, data.session_id, data.model,
     data.usage?.promptTokens ?? null, data.usage?.completionTokens ?? null,
     data.usage?.reasoningTokens ?? null, data.duration_ms,
-    data.status, data.error ?? null
+    data.status, data.error ?? null, new Date().toLocaleString('sv-SE')
   );
 }
 

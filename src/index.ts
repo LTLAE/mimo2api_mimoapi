@@ -24,6 +24,12 @@ app.get('/', (c) => {
   return c.html(html);
 });
 
+app.get('/style.css', (c) => {
+  const css = readFileSync(join(__dirname, 'web', 'style.css'), 'utf-8');
+  c.header('Content-Type', 'text/css');
+  return c.body(css);
+});
+
 // Health
 app.get('/health', (c) => c.json({ status: 'ok', ts: Date.now() }));
 

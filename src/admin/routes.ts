@@ -96,6 +96,11 @@ export function registerAdmin(app: Hono) {
     return c.json({ message: 'Deleted' });
   });
 
+  admin.delete('/sessions', (c) => {
+    db.prepare('DELETE FROM sessions').run();
+    return c.json({ message: 'All sessions deleted' });
+  });
+
   // --- Logs ---
   admin.get('/logs', (c) => {
     const accountId = c.req.query('account_id');

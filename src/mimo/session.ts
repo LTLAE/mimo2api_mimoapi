@@ -33,8 +33,7 @@ export async function getOrCreateSession(
     if (existing.cumulative_prompt_tokens > config.contextResetThreshold) {
       db.prepare('UPDATE sessions SET is_expired = 1 WHERE id = ?').run(existing.id);
     } else {
-      const historyToCheck = messages.slice(0, -1);
-      const currentHash = hashMessages(historyToCheck);
+      const currentHash = hashMessages(messages);
       if (currentHash === existing.last_messages_hash) {
         db.prepare("UPDATE sessions SET last_used_at = datetime('now') WHERE id = ?").run(existing.id);
         return { conversationId: existing.conversation_id, reuseHistory: true, session: existing };
@@ -45,7 +44,7 @@ export async function getOrCreateSession(
 
   const id = uuidv4();
   const conversationId = uuidv4().replace(/-/g, '');
-  const historyHash = hashMessages(messages.slice(0, -1));
+  const historyHash = hashMessages(messages);
   db.prepare(
     `INSERT INTO sessions
      (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)

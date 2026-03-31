@@ -5,170 +5,122 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MiMo Proxy 管理面板</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={theme:{extend:{colors:{brand:'#6366f1',surface:'#1e2130',border:'#2d3148',bg:'#0f1117'}}}}</script>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
-.layout{display:flex;height:100vh}
-.sidebar{width:220px;background:#1a1d27;padding:20px 0;flex-shrink:0;display:flex;flex-direction:column}
-.sidebar h1{font-size:16px;font-weight:700;color:#7c86ff;padding:0 20px 20px;border-bottom:1px solid #2d3148}
-.nav-item{padding:10px 20px;cursor:pointer;color:#94a3b8;font-size:14px;transition:all .2s;border-left:3px solid transparent}
-.nav-item:hover,.nav-item.active{background:#242840;color:#e2e8f0;border-left-color:#7c86ff}
-.main{flex:1;overflow-y:auto;padding:24px}
-.page{display:none}.page.active{display:block}
-.card{background:#1a1d27;border:1px solid #2d3148;border-radius:12px;padding:20px;margin-bottom:16px}
-.card h2{font-size:15px;font-weight:600;margin-bottom:16px;color:#c8d0f0}
-.btn{padding:8px 16px;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:all .2s}
-.btn-primary{background:#7c86ff;color:#fff}.btn-primary:hover{background:#6671e8}
-.btn-danger{background:#e55;color:#fff}.btn-danger:hover{background:#c33}
-.btn-success{background:#22c55e;color:#fff}.btn-success:hover{background:#16a34a}
-.btn-sm{padding:4px 10px;font-size:12px}
-.btn-ghost{background:transparent;border:1px solid #2d3148;color:#94a3b8}.btn-ghost:hover{border-color:#7c86ff;color:#7c86ff}
-input,textarea,select{background:#0f1117;border:1px solid #2d3148;border-radius:8px;padding:8px 12px;color:#e2e8f0;font-size:13px;width:100%}
-input:focus,textarea:focus,select:focus{outline:none;border-color:#7c86ff}
-textarea{resize:vertical;min-height:80px}
-.form-group{margin-bottom:12px}
-.form-group label{display:block;font-size:12px;color:#94a3b8;margin-bottom:4px}
-.table{width:100%;border-collapse:collapse;font-size:13px}
-.table th{text-align:left;padding:10px 12px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3148}
-.table td{padding:10px 12px;border-bottom:1px solid #1e2235}
-.table tr:hover td{background:#1e2235}
-.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:500}
-.badge-green{background:#14532d;color:#4ade80}
-.badge-red{background:#450a0a;color:#f87171}
-.badge-yellow{background:#422006;color:#fbbf24}
-.badge-blue{background:#1e3a5f;color:#60a5fa}
-.stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
-.stat-card{background:#1a1d27;border:1px solid #2d3148;border-radius:10px;padding:16px;text-align:center}
-.stat-value{font-size:28px;font-weight:700;color:#7c86ff}
-.stat-label{font-size:12px;color:#64748b;margin-top:4px}
-.flex{display:flex;gap:8px;align-items:center}
-.flex-1{flex:1}
-.mt-8{margin-top:8px}
-.alert{padding:10px 14px;border-radius:8px;font-size:13px;margin-bottom:12px}
-.alert-success{background:#14532d33;border:1px solid #14532d;color:#4ade80}
-.alert-error{background:#450a0a33;border:1px solid #450a0a;color:#f87171}
-#toast{position:fixed;bottom:20px;right:20px;z-index:999;pointer-events:none}
-.toast-item{background:#1a1d27;border:1px solid #2d3148;border-radius:8px;padding:12px 16px;margin-top:8px;font-size:13px;animation:slideIn .3s ease}
-@keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:none;opacity:1}}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
-.dot-green{background:#4ade80}.dot-red{background:#f87171}
-.log-filter{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
-.pagination{display:flex;gap:4px;margin-top:12px;justify-content:center}
-.page-btn{padding:4px 10px;border:1px solid #2d3148;background:#1a1d27;color:#94a3b8;border-radius:6px;cursor:pointer;font-size:12px}
-.page-btn.active,.page-btn:hover{border-color:#7c86ff;color:#7c86ff}
-.ws-indicator{font-size:11px;color:#64748b;margin-top:auto;padding:12px 20px}
+  .page{display:none}.page.active{display:block}
+  .nav-item{transition:all .2s;border-left:3px solid transparent}
+  .nav-item:hover,.nav-item.active{background:#242840;color:#e2e8f0;border-left-color:#6366f1}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:500}
+  .badge-green{background:#14532d;color:#4ade80}
+  .badge-red{background:#450a0a;color:#f87171}
+  .badge-yellow{background:#422006;color:#fbbf24}
+  .badge-blue{background:#1e3a5f;color:#60a5fa}
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+  .table{width:100%;border-collapse:collapse;font-size:13px}
+  .table th{text-align:left;padding:10px 12px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3148}
+  .table td{padding:10px 12px;border-bottom:1px solid #1e2235}
+  .table tr:hover td{background:#1e2235}
+  .toast-item{background:#1e2130;border:1px solid #2d3148;border-radius:8px;padding:12px 16px;margin-top:8px;font-size:13px;animation:slideIn .3s ease}
+  @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:none;opacity:1}}
+  .page-btn{padding:4px 10px;border:1px solid #2d3148;background:#1e2130;color:#94a3b8;border-radius:6px;cursor:pointer;font-size:12px}
+  .page-btn.active,.page-btn:hover{border-color:#6366f1;color:#6366f1}
+  input,textarea,select{background:#0f1117;border:1px solid #2d3148;border-radius:8px;padding:8px 12px;color:#e2e8f0;font-size:13px;width:100%}
+  input:focus,textarea:focus,select:focus{outline:none;border-color:#6366f1}
+  textarea{resize:vertical;min-height:80px}
 </style>
 </head>
-<body>
-<div id="toast"></div>
-<div class="layout">
-  <div class="sidebar">
-    <h1>MiMo Proxy</h1>
-    <div class="nav-item active" onclick="showPage('accounts')">账号管理</div>
-    <div class="nav-item" onclick="showPage('monitor')">实时监控</div>
-    <div class="nav-item" onclick="showPage('stats')">Token 统计</div>
-    <div class="nav-item" onclick="showPage('logs')">请求日志</div>
-    <div class="nav-item" onclick="showPage('sessions')">会话管理</div>
-    <div class="ws-indicator" id="wsStatus">● 检测中...</div>
-  </div>
-  <div class="main">
+<body class="bg-[#0f1117] text-slate-200 min-h-screen">
+<div id="toast" class="fixed bottom-5 right-5 z-50 pointer-events-none"></div>
+<div class="flex h-screen">
+  <!-- 侧边栏 -->
+  <aside class="w-56 bg-[#1a1d27] flex flex-col flex-shrink-0 border-r border-[#2d3148]">
+    <div class="px-5 py-5 border-b border-[#2d3148]">
+      <div class="flex items-center gap-2">
+        <div class="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center text-white font-bold text-sm">M</div>
+        <span class="font-bold text-indigo-400 text-sm tracking-wide">MiMo Proxy</span>
+      </div>
+    </div>
+    <nav class="flex-1 py-3">
+      <div class="nav-item px-5 py-2.5 cursor-pointer text-slate-400 text-sm flex items-center gap-2.5 active" onclick="showPage('accounts',this)"><svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>账号管理</div>
+      <div class="nav-item px-5 py-2.5 cursor-pointer text-slate-400 text-sm flex items-center gap-2.5" onclick="showPage('monitor',this)"><svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z"/></svg>实时监控</div>
+      <div class="nav-item px-5 py-2.5 cursor-pointer text-slate-400 text-sm flex items-center gap-2.5" onclick="showPage('stats',this)"><svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z"/></svg>Token 统计</div>
+      <div class="nav-item px-5 py-2.5 cursor-pointer text-slate-400 text-sm flex items-center gap-2.5" onclick="showPage('logs',this)"><svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>请求日志</div>
+      <div class="nav-item px-5 py-2.5 cursor-pointer text-slate-400 text-sm flex items-center gap-2.5" onclick="showPage('sessions',this)"><svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V20.5l3.5-3.5"/></svg>会话管理</div>
+    </nav>
+    <div class="px-5 py-3 text-xs text-slate-600" id="wsStatus">● 检测中...</div>
+  </aside>
+  <!-- 主内容 -->
+  <main class="flex-1 overflow-y-auto px-6 py-6">
 
     <!-- 账号管理 -->
     <div class="page active" id="page-accounts">
-      <div class="card">
-        <h2>添加账号</h2>
-        <div class="form-group">
-          <label>别名（可选）</label>
-          <input id="addAlias" placeholder="如：账号1">
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5 mb-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">添加账号</h2>
+        <div class="mb-3"><label class="block text-xs text-slate-500 mb-1">别名（可选）</label><input id="addAlias" placeholder="如：账号1" class="w-full bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"></div>
+        <div class="mb-3"><label class="block text-xs text-slate-500 mb-1">粘贴 cURL 命令（自动解析凭证）</label><textarea id="addCurl" placeholder="curl 'https://aistudio.xiaomimimo.com/...'" class="w-full bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 resize-y min-h-[72px]"></textarea></div>
+        <div class="flex items-center gap-3 mt-3">
+          <button onclick="addAccount()" class="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium rounded-lg transition-colors cursor-pointer">添加账号</button>
+          <span class="text-xs text-slate-600">或直接填写：</span>
+          <button onclick="toggleManual()" class="px-3 py-1.5 border border-[#2d3148] hover:border-indigo-500 text-slate-400 hover:text-indigo-400 text-xs rounded-lg transition-colors cursor-pointer">手动填写</button>
         </div>
-        <div class="form-group">
-          <label>粘贴 cURL 命令（自动解析凭证）</label>
-          <textarea id="addCurl" placeholder="curl 'https://aistudio.xiaomimimo.com/open-apis/bot/chat?...' -H 'Cookie: ...' ..."></textarea>
-        </div>
-        <div class="flex mt-8">
-          <button class="btn btn-primary" onclick="addAccount()">添加账号</button>
-          <span style="font-size:12px;color:#64748b;margin-left:8px">或直接填写：</span>
-          <button class="btn btn-ghost btn-sm" onclick="toggleManual()">手动填写</button>
-        </div>
-        <div id="manualForm" style="display:none;margin-top:12px">
-          <div class="form-group"><label>serviceToken</label><input id="mST" placeholder="serviceToken"></div>
-          <div class="form-group"><label>userId</label><input id="mUID" placeholder="userId"></div>
-          <div class="form-group"><label>xiaomichatbot_ph</label><input id="mPH" placeholder="xiaomichatbot_ph"></div>
-          <button class="btn btn-primary btn-sm" onclick="addAccountManual()">添加</button>
+        <div id="manualForm" class="hidden mt-4 space-y-3">
+          <div><label class="block text-xs text-slate-500 mb-1">serviceToken</label><input id="mST" placeholder="serviceToken" class="w-full bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"></div>
+          <div><label class="block text-xs text-slate-500 mb-1">userId</label><input id="mUID" placeholder="userId" class="w-full bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"></div>
+          <div><label class="block text-xs text-slate-500 mb-1">xiaomichatbot_ph</label><input id="mPH" placeholder="xiaomichatbot_ph" class="w-full bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"></div>
+          <button onclick="addAccountManual()" class="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-medium rounded-lg transition-colors cursor-pointer">添加</button>
         </div>
       </div>
-      <div class="card">
-        <h2>账号列表</h2>
-        <table class="table">
-          <thead><tr><th>别名</th><th>API Key</th><th>状态</th><th>并发</th><th>操作</th></tr></thead>
-          <tbody id="accountTable"></tbody>
-        </table>
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5 mb-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">账号列表</h2>
+        <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-500 border-b border-[#2d3148]"><th class="pb-2 pr-4 font-medium">别名</th><th class="pb-2 pr-4 font-medium">API Key</th><th class="pb-2 pr-4 font-medium">状态</th><th class="pb-2 pr-4 font-medium">并发</th><th class="pb-2 font-medium">操作</th></tr></thead><tbody id="accountTable" class="divide-y divide-[#2d3148]"></tbody></table></div>
       </div>
     </div>
 
     <!-- 实时监控 -->
     <div class="page" id="page-monitor">
-      <div class="stat-grid" id="monitorStats"></div>
-      <div class="card">
-        <h2>各账号并发状态</h2>
-        <table class="table">
-          <thead><tr><th>别名</th><th>API Key</th><th>活跃请求</th><th>状态</th></tr></thead>
-          <tbody id="monitorTable"></tbody>
-        </table>
+      <div class="grid grid-cols-3 gap-4 mb-4" id="monitorStats"></div>
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">各账号并发状态</h2>
+        <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-500 border-b border-[#2d3148]"><th class="pb-2 pr-4 font-medium">别名</th><th class="pb-2 pr-4 font-medium">API Key</th><th class="pb-2 pr-4 font-medium">活跃请求</th><th class="pb-2 font-medium">状态</th></tr></thead><tbody id="monitorTable" class="divide-y divide-[#2d3148]"></tbody></table></div>
       </div>
     </div>
 
     <!-- Token 统计 -->
     <div class="page" id="page-stats">
-      <div class="stat-grid" id="statsGrid"></div>
-      <div class="card">
-        <h2>各账号 Token 用量</h2>
-        <table class="table">
-          <thead><tr><th>别名</th><th>总请求</th><th>Prompt Tokens</th><th>Completion Tokens</th></tr></thead>
-          <tbody id="statsTable"></tbody>
-        </table>
+      <div class="grid grid-cols-3 gap-4 mb-4" id="statsGrid"></div>
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5 mb-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-4">各账号 Token 用量</h2>
+        <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-500 border-b border-[#2d3148]"><th class="pb-2 pr-4 font-medium">别名</th><th class="pb-2 pr-4 font-medium">总请求</th><th class="pb-2 pr-4 font-medium">输入 Token</th><th class="pb-2 font-medium">输出 Token</th></tr></thead><tbody id="statsTable" class="divide-y divide-[#2d3148]"></tbody></table></div>
       </div>
-      <div class="card"><h2>近期用量趋势</h2><canvas id="tokenChart" height="80"></canvas></div>
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><h2 class="text-sm font-semibold text-slate-300 mb-4">近期用量趋势</h2><canvas id="tokenChart" height="80"></canvas></div>
     </div>
 
     <!-- 请求日志 -->
     <div class="page" id="page-logs">
-      <div class="card">
-        <div class="log-filter">
-          <select id="logStatus" style="width:120px" onchange="loadLogs(1)">
-            <option value="">全部状态</option>
-            <option value="success">成功</option>
-            <option value="error">失败</option>
-          </select>
-          <select id="logEndpoint" style="width:120px" onchange="loadLogs(1)">
-            <option value="">全部端点</option>
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
-          </select>
-          <button class="btn btn-ghost btn-sm" onclick="loadLogs(1)">刷新</button>
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5">
+        <div class="flex items-center gap-3 mb-4">
+          <select id="logStatus" onchange="loadLogs(1)" class="bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 w-28"><option value="">全部状态</option><option value="success">成功</option><option value="error">失败</option></select>
+          <select id="logEndpoint" onchange="loadLogs(1)" class="bg-[#0f1117] border border-[#2d3148] rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500 w-28"><option value="">全部端点</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>
+          <button onclick="loadLogs(1)" class="px-3 py-1.5 border border-[#2d3148] hover:border-indigo-500 text-slate-400 hover:text-indigo-400 text-xs rounded-lg transition-colors cursor-pointer">刷新</button>
         </div>
-        <table class="table">
-          <thead><tr><th>时间</th><th>端点</th><th>模型</th><th>Prompt</th><th>Completion</th><th>耗时</th><th>状态</th></tr></thead>
-          <tbody id="logTable"></tbody>
-        </table>
-        <div class="pagination" id="logPagination"></div>
+        <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-500 border-b border-[#2d3148]"><th class="pb-2 pr-4 font-medium">时间</th><th class="pb-2 pr-4 font-medium">端点</th><th class="pb-2 pr-4 font-medium">模型</th><th class="pb-2 pr-4 font-medium">输入 Token</th><th class="pb-2 pr-4 font-medium">输出 Token</th><th class="pb-2 pr-4 font-medium">耗时</th><th class="pb-2 font-medium">状态</th></tr></thead><tbody id="logTable" class="divide-y divide-[#2d3148]"></tbody></table></div>
+        <div class="flex gap-1 mt-4" id="logPagination"></div>
       </div>
     </div>
 
     <!-- 会话管理 -->
     <div class="page" id="page-sessions">
-      <div class="card">
-        <div class="flex" style="margin-bottom:12px">
-          <button class="btn btn-ghost btn-sm" onclick="loadSessions()">刷新</button>
+      <div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-slate-300">会话列表</h2>
+          <button onclick="loadSessions()" class="px-3 py-1.5 border border-[#2d3148] hover:border-indigo-500 text-slate-400 hover:text-indigo-400 text-xs rounded-lg transition-colors cursor-pointer">刷新</button>
         </div>
-        <table class="table">
-          <thead><tr><th>会话ID</th><th>账号</th><th>客户端Key</th><th>累计Token</th><th>最后使用</th><th>操作</th></tr></thead>
-          <tbody id="sessionTable"></tbody>
-        </table>
+        <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left text-xs text-slate-500 border-b border-[#2d3148]"><th class="pb-2 pr-4 font-medium">会话ID</th><th class="pb-2 pr-4 font-medium">账号</th><th class="pb-2 pr-4 font-medium">客户端Key</th><th class="pb-2 pr-4 font-medium">累计Token</th><th class="pb-2 pr-4 font-medium">最后使用</th><th class="pb-2 font-medium">操作</th></tr></thead><tbody id="sessionTable" class="divide-y divide-[#2d3148]"></tbody></table></div>
       </div>
     </div>
 
-  </div>
+  </main>
 </div>
 <script>
 const ADMIN_KEY = localStorage.getItem('adminKey') || prompt('请输入 Admin Key:') || '';
@@ -176,20 +128,22 @@ if (ADMIN_KEY) localStorage.setItem('adminKey', ADMIN_KEY);
 const api = (path, opts={}) => fetch(path, {...opts, headers:{'Content-Type':'application/json','X-Admin-Key':ADMIN_KEY,...(opts.headers||{})}, body:opts.body?JSON.stringify(opts.body):undefined}).then(r=>r.json());
 function toast(msg,ok=true){const el=document.createElement('div');el.className='toast-item';el.style.color=ok?'#4ade80':'#f87171';el.textContent=msg;document.getElementById('toast').appendChild(el);setTimeout(()=>el.remove(),3000);}
 let monitorTimer=null;
-function showPage(name){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('page-'+name).classList.add('active');event.currentTarget.classList.add('active');clearInterval(monitorTimer);if(name==='monitor'){loadMonitor();monitorTimer=setInterval(loadMonitor,3000);}else{({accounts:loadAccounts,stats:loadStats,logs:()=>loadLogs(1),sessions:loadSessions})[name]?.();}}
-async function loadAccounts(){const data=await api('/admin/accounts');document.getElementById('accountTable').innerHTML=data.map(a=>`<tr><td>${a.alias||'-'}</td><td><code style="font-size:11px;color:#7c86ff">${a.api_key}</code></td><td><span class="badge ${a.is_active?'badge-green':'badge-red'}">${a.is_active?'启用':'禁用'}</span></td><td>${a.active_requests}</td><td class="flex"><button class="btn btn-ghost btn-sm" onclick="testAccount('${a.id}')">测试</button><button class="btn btn-ghost btn-sm" onclick="toggleAccount('${a.id}',${a.is_active})">${a.is_active?'禁用':'启用'}</button><button class="btn btn-danger btn-sm" onclick="removeAccount('${a.id}')">删除</button></td></tr>`).join('');}
+function showPage(name,el){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.nav-item').forEach(n=>{n.classList.remove('active');n.classList.remove('text-slate-200');n.classList.add('text-slate-400');});document.getElementById('page-'+name).classList.add('active');el.classList.add('active');el.classList.remove('text-slate-400');el.classList.add('text-slate-200');clearInterval(monitorTimer);if(name==='monitor'){loadMonitor();monitorTimer=setInterval(loadMonitor,3000);}else{({accounts:loadAccounts,stats:loadStats,logs:()=>loadLogs(1),sessions:loadSessions})[name]?.();}}
+async function loadAccounts(){const data=await api('/admin/accounts');const tbody=document.getElementById('accountTable');if(!data||data.length===0){tbody.innerHTML='<tr><td colspan="5" class="py-8 text-center text-slate-500 text-sm">暂无账号数据</td></tr>';return;}tbody.innerHTML=data.map(a=>`<tr class="text-slate-300 hover:bg-[#242840] transition-colors"><td class="py-2.5 pr-4">${a.alias||'-'}</td><td class="py-2.5 pr-4"><div class="flex items-center gap-1.5"><code class="text-xs text-indigo-400 font-mono">${a.api_key.slice(0,24)}...</code><button onclick="copyKey('${a.api_key}')" title="复制" class="text-slate-500 hover:text-indigo-400 transition-colors cursor-pointer"><svg xmlns='http://www.w3.org/2000/svg' class='w-3.5 h-3.5' fill='none' viewBox='0 0 24 24' stroke='currentColor' stroke-width='2'><rect x='9' y='9' width='13' height='13' rx='2' ry='2'></rect><path d='M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1'></path></svg></button></div></td><td class="py-2.5 pr-4"><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${a.is_active?'bg-emerald-900/50 text-emerald-400':'bg-red-900/50 text-red-400'}">${a.is_active?'启用':'禁用'}</span></td><td class="py-2.5 pr-4 text-slate-400">${a.active_requests}</td><td class="py-2.5"><div class="flex gap-1.5"><button class="px-2.5 py-1 border border-[#2d3148] hover:border-indigo-500 text-slate-400 hover:text-indigo-400 text-xs rounded-lg transition-colors cursor-pointer" onclick="editAccount('${a.id}','${a.alias||''}')">编辑</button><button class="px-2.5 py-1 border border-[#2d3148] hover:border-indigo-500 text-slate-400 hover:text-indigo-400 text-xs rounded-lg transition-colors cursor-pointer" onclick="testAccount('${a.id}')">测试</button><button class="px-2.5 py-1 border border-[#2d3148] hover:border-indigo-500 text-slate-400 hover:text-indigo-400 text-xs rounded-lg transition-colors cursor-pointer" onclick="toggleAccount('${a.id}',${a.is_active})">${a.is_active?'禁用':'启用'}</button><button class="px-2.5 py-1 bg-red-900/40 hover:bg-red-800/60 text-red-400 text-xs rounded-lg transition-colors cursor-pointer" onclick="removeAccount('${a.id}')">删除</button></div></td></tr>`).join('');}
 async function addAccount(){const curl=document.getElementById('addCurl').value.trim(),alias=document.getElementById('addAlias').value.trim();if(!curl){toast('请粘贴 cURL 命令',false);return;}const res=await api('/admin/accounts',{method:'POST',body:{curl,alias}});res.api_key?toast('添加成功，API Key: '+res.api_key):toast(res.error||'添加失败',false);if(res.api_key)loadAccounts();}
-function toggleManual(){const f=document.getElementById('manualForm');f.style.display=f.style.display==='none'?'block':'none';}
+function toggleManual(){const f=document.getElementById('manualForm');f.classList.toggle('hidden');}
 async function addAccountManual(){const body={service_token:document.getElementById('mST').value.trim(),user_id:document.getElementById('mUID').value.trim(),ph_token:document.getElementById('mPH').value.trim(),alias:document.getElementById('addAlias').value.trim()};if(!body.service_token){toast('serviceToken不能为空',false);return;}const res=await api('/admin/accounts',{method:'POST',body});res.api_key?toast('添加成功: '+res.api_key):toast(res.error||'失败',false);if(res.api_key)loadAccounts();}
+function copyKey(key){navigator.clipboard.writeText(key).then(()=>toast('已复制 API Key'));}
+function editAccount(id,alias){const newAlias=prompt('修改别名：',alias);if(newAlias===null)return;api('/admin/accounts/'+id,{method:'PATCH',body:{alias:newAlias}}).then(r=>{r.id?toast('别名已更新'):toast(r.error||'更新失败',false);loadAccounts();});}
 async function testAccount(id){toast('测试中...');const res=await api('/admin/accounts/test',{method:'POST',body:{id}});res.success?toast('有效: '+res.response.slice(0,80)):toast('无效: '+res.error,false);}
 async function toggleAccount(id,cur){await api('/admin/accounts/'+id,{method:'PATCH',body:{is_active:cur?0:1}});loadAccounts();}
 async function removeAccount(id){if(!confirm('确认删除？'))return;await api('/admin/accounts/'+id,{method:'DELETE'});toast('已删除');loadAccounts();}
-async function loadMonitor(){const s=await api('/admin/stats');const accs=s.accounts||[];const totalActive=accs.reduce((x,a)=>x+a.active_requests,0);const totalReqs=accs.reduce((x,a)=>x+a.total_requests,0);document.getElementById('monitorStats').innerHTML=`<div class="stat-card"><div class="stat-value">${accs.filter(a=>a.is_active).length}</div><div class="stat-label">活跃账号</div></div><div class="stat-card"><div class="stat-value">${totalActive}</div><div class="stat-label">当前并发</div></div><div class="stat-card"><div class="stat-value">${totalReqs}</div><div class="stat-label">总请求数</div></div>`;document.getElementById('monitorTable').innerHTML=accs.map(a=>`<tr><td>${a.alias||'-'}</td><td><code style="font-size:11px">${a.api_key.slice(0,20)}...</code></td><td>${a.active_requests}</td><td><span class="badge ${a.is_active?'badge-green':'badge-red'}">${a.is_active?'启用':'禁用'}</span></td></tr>`).join('');}
+async function loadMonitor(){const s=await api('/admin/stats');const accs=s.accounts||[];const totalActive=accs.reduce((x,a)=>x+a.active_requests,0);const totalReqs=accs.reduce((x,a)=>x+a.total_requests,0);document.getElementById('monitorStats').innerHTML=`<div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><div class="text-2xl font-bold text-slate-100">${accs.filter(a=>a.is_active).length}</div><div class="text-xs text-slate-500 mt-1">活跃账号</div></div><div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><div class="text-2xl font-bold text-indigo-400">${totalActive}</div><div class="text-xs text-slate-500 mt-1">当前并发</div></div><div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><div class="text-2xl font-bold text-emerald-400">${totalReqs}</div><div class="text-xs text-slate-500 mt-1">总请求数</div></div>`;document.getElementById('monitorTable').innerHTML=accs.map(a=>`<tr class="text-slate-300 hover:bg-[#242840] transition-colors"><td class="py-2.5 pr-4">${a.alias||'-'}</td><td class="py-2.5 pr-4"><code class="text-xs text-slate-500 font-mono">${a.api_key.slice(0,20)}...</code></td><td class="py-2.5 pr-4 text-slate-400">${a.active_requests}</td><td class="py-2.5"><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${a.is_active?'bg-emerald-900/50 text-emerald-400':'bg-red-900/50 text-red-400'}">${a.is_active?'启用':'禁用'}</span></td></tr>`).join('');}
 let tokenChart=null;
-async function loadStats(){const s=await api('/admin/stats');const accs=s.accounts||[];const totalPT=accs.reduce((x,a)=>x+a.total_prompt_tokens,0);const totalCT=accs.reduce((x,a)=>x+a.total_completion_tokens,0);document.getElementById('statsGrid').innerHTML=`<div class="stat-card"><div class="stat-value">${totalPT.toLocaleString()}</div><div class="stat-label">Prompt Tokens</div></div><div class="stat-card"><div class="stat-value">${totalCT.toLocaleString()}</div><div class="stat-label">Completion Tokens</div></div><div class="stat-card"><div class="stat-value">${(totalPT+totalCT).toLocaleString()}</div><div class="stat-label">Total Tokens</div></div>`;document.getElementById('statsTable').innerHTML=accs.map(a=>`<tr><td>${a.alias||'-'}</td><td>${a.total_requests}</td><td>${(a.total_prompt_tokens||0).toLocaleString()}</td><td>${(a.total_completion_tokens||0).toLocaleString()}</td></tr>`).join('');const ctx=document.getElementById('tokenChart').getContext('2d');const labels=accs.map(a=>a.alias||a.api_key.slice(0,12));const ptData=accs.map(a=>a.total_prompt_tokens||0);const ctData=accs.map(a=>a.total_completion_tokens||0);if(tokenChart)tokenChart.destroy();tokenChart=new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'Prompt Tokens',data:ptData,backgroundColor:'#7c86ff88'},{label:'Completion Tokens',data:ctData,backgroundColor:'#22c55e88'}]},options:{responsive:true,plugins:{legend:{labels:{color:'#94a3b8'}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}},y:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}}}}});}
+async function loadStats(){const s=await api('/admin/stats');const accs=s.accounts||[];const totalPT=accs.reduce((x,a)=>x+a.total_prompt_tokens,0);const totalCT=accs.reduce((x,a)=>x+a.total_completion_tokens,0);document.getElementById('statsGrid').innerHTML=`<div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><div class="text-2xl font-bold text-indigo-400">${totalPT.toLocaleString()}</div><div class="text-xs text-slate-500 mt-1">输入 Token</div></div><div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><div class="text-2xl font-bold text-emerald-400">${totalCT.toLocaleString()}</div><div class="text-xs text-slate-500 mt-1">输出 Token</div></div><div class="bg-[#1a1d27] border border-[#2d3148] rounded-xl p-5"><div class="text-2xl font-bold text-slate-100">${(totalPT+totalCT).toLocaleString()}</div><div class="text-xs text-slate-500 mt-1">总 Token</div></div>`;document.getElementById('statsTable').innerHTML=accs.map(a=>`<tr class="text-slate-300 hover:bg-[#242840] transition-colors"><td class="py-2.5 pr-4">${a.alias||'-'}</td><td class="py-2.5 pr-4 text-slate-400">${a.total_requests}</td><td class="py-2.5 pr-4 text-indigo-400">${(a.total_prompt_tokens||0).toLocaleString()}</td><td class="py-2.5 text-emerald-400">${(a.total_completion_tokens||0).toLocaleString()}</td></tr>`).join('');const ctx=document.getElementById('tokenChart').getContext('2d');const labels=accs.map(a=>a.alias||a.api_key.slice(0,12));const ptData=accs.map(a=>a.total_prompt_tokens||0);const ctData=accs.map(a=>a.total_completion_tokens||0);if(tokenChart)tokenChart.destroy();tokenChart=new Chart(ctx,{type:'bar',data:{labels,datasets:[{label:'输入 Token',data:ptData,backgroundColor:'#7c86ff88'},{label:'输出 Token',data:ctData,backgroundColor:'#22c55e88'}]},options:{responsive:true,plugins:{legend:{labels:{color:'#94a3b8'}}},scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}},y:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}}}}});}
 let logPage=1;
-async function loadLogs(page=1){logPage=page;const status=document.getElementById('logStatus').value;const endpoint=document.getElementById('logEndpoint').value;let url=`/admin/logs?page=${page}&limit=50`;if(status)url+=`&status=${status}`;if(endpoint)url+=`&endpoint=${endpoint}`;const d=await api(url);document.getElementById('logTable').innerHTML=(d.logs||[]).map(l=>`<tr><td style="font-size:11px">${l.created_at||''}</td><td><span class="badge badge-blue">${l.endpoint}</span></td><td>${l.model||'-'}</td><td>${l.prompt_tokens??'-'}</td><td>${l.completion_tokens??'-'}</td><td>${l.duration_ms??'-'}ms</td><td><span class="badge ${l.status==='success'?'badge-green':'badge-red'}">${l.status}</span>${l.error?`<span style="color:#f87171;font-size:11px;margin-left:4px">${l.error.slice(0,40)}</span>`:''}</td></tr>`).join('');const totalPages=Math.ceil((d.total||0)/50);const pg=document.getElementById('logPagination');pg.innerHTML=Array.from({length:Math.min(totalPages,10)},(_,i)=>`<button class="page-btn ${i+1===page?'active':''}" onclick="loadLogs(${i+1})">${i+1}</button>`).join('');}
-async function loadSessions(){const data=await api('/admin/sessions');document.getElementById('sessionTable').innerHTML=(data||[]).map(s=>`<tr><td style="font-size:11px">${s.id.slice(0,16)}...</td><td>${s.account_id.slice(0,12)}...</td><td>${s.client_session_id}</td><td>${(s.cumulative_prompt_tokens||0).toLocaleString()}</td><td style="font-size:11px">${s.last_used_at||''}</td><td><button class="btn btn-danger btn-sm" onclick="deleteSession('${s.id}')">删除</button></td></tr>`).join('');}
+async function loadLogs(page=1){logPage=page;const status=document.getElementById('logStatus').value;const endpoint=document.getElementById('logEndpoint').value;let url=`/admin/logs?page=${page}&limit=50`;if(status)url+=`&status=${status}`;if(endpoint)url+=`&endpoint=${endpoint}`;const d=await api(url);document.getElementById('logTable').innerHTML=(d.logs||[]).map(l=>`<tr class="text-slate-300 hover:bg-[#242840] transition-colors"><td class="py-2.5 pr-4 text-xs text-slate-500 font-mono whitespace-nowrap">${l.created_at||''}</td><td class="py-2.5 pr-4"><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-900/50 text-indigo-400">${l.endpoint}</span></td><td class="py-2.5 pr-4 text-xs text-slate-400">${l.model||'-'}</td><td class="py-2.5 pr-4 text-xs text-indigo-400">${l.prompt_tokens??'-'}</td><td class="py-2.5 pr-4 text-xs text-emerald-400">${l.completion_tokens??'-'}</td><td class="py-2.5 pr-4 text-xs text-slate-400">${l.duration_ms??'-'}ms</td><td class="py-2.5"><span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${l.status==='success'?'bg-emerald-900/50 text-emerald-400':'bg-red-900/50 text-red-400'}">${l.status==='success'?'成功':'失败'}</span>${l.error?`<span class="text-red-400 text-xs ml-1">${l.error.slice(0,40)}</span>`:''}</td></tr>`).join('');const totalPages=Math.ceil((d.total||0)/50);const pg=document.getElementById('logPagination');pg.innerHTML=Array.from({length:Math.min(totalPages,10)},(_,i)=>`<button class="px-2.5 py-1 text-xs rounded-lg border transition-colors cursor-pointer ${i+1===page?'bg-indigo-500 border-indigo-500 text-white':'border-[#2d3148] text-slate-400 hover:border-indigo-500 hover:text-indigo-400'}" onclick="loadLogs(${i+1})">${i+1}</button>`).join('');}
+async function loadSessions(){const data=await api('/admin/sessions');document.getElementById('sessionTable').innerHTML=(data||[]).map(s=>`<tr class="text-slate-300 hover:bg-[#242840] transition-colors"><td class="py-2.5 pr-4 text-xs text-slate-500 font-mono">${s.id.slice(0,16)}...</td><td class="py-2.5 pr-4 text-xs text-slate-500 font-mono">${s.account_id.slice(0,12)}...</td><td class="py-2.5 pr-4 text-xs text-slate-400">${s.client_session_id}</td><td class="py-2.5 pr-4 text-xs text-indigo-400">${(s.cumulative_prompt_tokens||0).toLocaleString()}</td><td class="py-2.5 pr-4 text-xs text-slate-500">${s.last_used_at||''}</td><td class="py-2.5"><button class="px-2.5 py-1 bg-red-900/40 hover:bg-red-800/60 text-red-400 text-xs rounded-lg transition-colors cursor-pointer" onclick="deleteSession('${s.id}')">删除</button></td></tr>`).join('');}
 async function deleteSession(id){if(!confirm('确认删除会话？'))return;await api('/admin/sessions/'+id,{method:'DELETE'});toast('已删除');loadSessions();}
 loadAccounts();
 
