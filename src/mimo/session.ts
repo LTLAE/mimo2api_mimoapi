@@ -31,7 +31,30 @@ export async function getOrCreateSession(
 
   if (existing) {
     if (existing.cumulative_prompt_tokens > config.contextResetThreshold) {
-      db.prepare('UPDATE sessions SET is_expired = 1 WHERE id = ?').run(existing.id);
+      // Token 超限，需要重置会话
+      // 使用事务确保原子性
+      const transaction = db.transaction(() => {
+        // 1. 过期所有相同 client_session_id 的会话（防止并发问题）
+        db.prepare(
+          'UPDATE sessions SET is_expired = 1 WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
+        ).run(accountId, clientSessionId);
+        
+        // 2. 创建新会话
+        const id = uuidv4();
+        const conversationId = uuidv4().replace(/-/g, '');
+        const historyHash = hashMessages(messages);
+        db.prepare(
+          `INSERT INTO sessions
+           (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)
+           VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+        ).run(id, accountId, clientSessionId, conversationId, historyHash, messages.length);
+        
+        return { id, conversationId, historyHash };
+      });
+      
+      const result = transaction();
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(result.id) as Session;
+      return { conversationId: result.conversationId, reuseHistory: false, session };
     } else {
       const currentHash = hashMessages(messages);
       const reuseHistory = currentHash === existing.last_messages_hash;
@@ -40,17 +63,29 @@ export async function getOrCreateSession(
     }
   }
 
-  const id = uuidv4();
-  const conversationId = uuidv4().replace(/-/g, '');
-  const historyHash = hashMessages(messages);
-  db.prepare(
-    `INSERT INTO sessions
-     (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
-  ).run(id, accountId, clientSessionId, conversationId, historyHash, messages.length);
-
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Session;
-  return { conversationId, reuseHistory: false, session };
+  // 没有现有会话，创建新的
+  // 使用事务和 INSERT OR REPLACE 防止并发冲突
+  const transaction = db.transaction(() => {
+    // 先过期所有可能存在的旧会话（防止并发创建）
+    db.prepare(
+      'UPDATE sessions SET is_expired = 1 WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
+    ).run(accountId, clientSessionId);
+    
+    const id = uuidv4();
+    const conversationId = uuidv4().replace(/-/g, '');
+    const historyHash = hashMessages(messages);
+    db.prepare(
+      `INSERT INTO sessions
+       (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+    ).run(id, accountId, clientSessionId, conversationId, historyHash, messages.length);
+    
+    return { id, conversationId };
+  });
+  
+  const result = transaction();
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(result.id) as Session;
+  return { conversationId: result.conversationId, reuseHistory: false, session };
 }
 
 export function updateSessionTokens(
