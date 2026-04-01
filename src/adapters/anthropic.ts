@@ -202,11 +202,21 @@ export function registerAnthropic(app: Hono) {
           tokens: session.cumulative_prompt_tokens
         });
       } else {
-        console.log('[SESSION] Creating new session...');
+        console.log('[SESSION] Creating new session (first request)...');
+        // 生成新的会话标识
         conversationId = uuidv4().replace(/-/g, '');
         effectiveClientSessionId = conversationId;
+        
+        // 调用 getOrCreateSession 创建数据库记录
+        const { session } = await getOrCreateSession(account.id, effectiveClientSessionId, messages);
+        sessionId = session.id;
+        
         query = serializeMessages(messages);
-        console.log('[SESSION] ✓ New conversation:', conversationId.slice(0, 8) + '...');
+        console.log('[SESSION] ✓ New session created:', {
+          sessionId: sessionId.slice(0, 8) + '...',
+          conversationId: conversationId.slice(0, 8) + '...',
+          clientSessionId: effectiveClientSessionId.slice(0, 16) + '...'
+        });
       }
 
       console.log('[MIMO] Calling MiMo API...', {
