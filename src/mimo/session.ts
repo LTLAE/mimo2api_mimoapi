@@ -45,50 +45,31 @@ export async function getOrCreateSession(
     if (existing.cumulative_prompt_tokens > config.contextResetThreshold) {
       console.log('[SESSION] Token limit exceeded, resetting session...');
       // Token 超限，需要重置会话
-      // 使用事务确保原子性
+      // 直接过期当前会话并创建新的（不使用 INSERT OR IGNORE，避免死循环）
       const transaction = db.transaction(() => {
-        // 1. 过期所有相同 client_session_id 的会话（防止并发问题）
+        // 1. 过期当前会话
         db.prepare(
-          'UPDATE sessions SET is_expired = 1 WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
-        ).run(accountId, clientSessionId);
+          'UPDATE sessions SET is_expired = 1 WHERE id = ?'
+        ).run(existing.id);
         
-        // 2. 创建新会话，使用 INSERT OR IGNORE 防止并发冲突
+        // 2. 创建新会话（使用新的 client_session_id 避免冲突）
         const id = uuidv4();
         const conversationId = uuidv4().replace(/-/g, '');
         const historyHash = hashMessages(messages);
         
-        const result = db.prepare(
-          `INSERT OR IGNORE INTO sessions
+        // 保持相同的 client_session_id，但因为旧记录已过期，不会冲突
+        db.prepare(
+          `INSERT INTO sessions
            (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)
            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
         ).run(id, accountId, clientSessionId, conversationId, historyHash, messages.length);
         
-        if (result.changes > 0) {
-          return { id, conversationId, historyHash, isNew: true };
-        } else {
-          // 并发冲突，重新查询
-          console.log('[SESSION] ⚠️ Concurrent reset detected, re-querying...');
-          const existingSession = db.prepare(
-            'SELECT * FROM sessions WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
-          ).get(accountId, clientSessionId) as Session | undefined;
-          
-          if (existingSession) {
-            return { id: existingSession.id, conversationId: existingSession.conversation_id, historyHash: existingSession.last_messages_hash, isNew: false };
-          } else {
-            throw new Error('Session reset race condition: record disappeared');
-          }
-        }
+        return { id, conversationId, historyHash };
       });
       
       const result = transaction();
       const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(result.id) as Session;
-      
-      if (result.isNew) {
-        console.log('[SESSION] ✓ New session created after reset:', result.id.slice(0, 8) + '...');
-      } else {
-        console.log('[SESSION] ✓ Session reset by concurrent request, reusing:', result.id.slice(0, 8) + '...');
-      }
-      
+      console.log('[SESSION] ✓ New session created after reset:', result.id.slice(0, 8) + '...');
       return { conversationId: result.conversationId, reuseHistory: false, session };
     } else {
       const currentHash = hashMessages(messages);
