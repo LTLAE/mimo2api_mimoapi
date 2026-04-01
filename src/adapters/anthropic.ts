@@ -525,9 +525,7 @@ export function registerAnthropic(app: Hono) {
           }
           
           if (sessionId && lastUsage) {
-            const { createHash } = await import('crypto');
-            const hash = createHash('sha256').update(JSON.stringify(messages)).digest('hex');
-            updateSessionTokens(sessionId, lastUsage.promptTokens, hash, messages.length);
+            updateSessionTokens(sessionId, lastUsage.promptTokens, messages);
           }
           if (!isAborted) {
             logRequest({ account_id: account.id, session_id: sessionId, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
@@ -558,9 +556,7 @@ export function registerAnthropic(app: Hono) {
       }
 
       if (sessionId && lastUsage) {
-        const { createHash } = await import('crypto');
-        const hash = createHash('sha256').update(JSON.stringify(messages)).digest('hex');
-        updateSessionTokens(sessionId, lastUsage.promptTokens, hash, messages.length);
+        updateSessionTokens(sessionId, lastUsage.promptTokens, messages);
       }
       logRequest({ account_id: account.id, session_id: sessionId, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
 

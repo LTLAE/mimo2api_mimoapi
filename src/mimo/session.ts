@@ -20,6 +20,28 @@ function hashMessages(messages: unknown[]): string {
   return createHash('sha256').update(JSON.stringify(messages)).digest('hex');
 }
 
+// 只对历史消息（不包含最后一条用户消息）计算 hash
+// 这样当用户发送新消息时，历史部分的 hash 不变，可以复用 MiMo 的对话历史
+function hashHistoryOnly(messages: any[]): string {
+  // 找到最后一条用户消息的索引
+  let lastUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  
+  // 如果没有用户消息，或者只有一条消息，返回空 hash
+  if (lastUserIndex <= 0) {
+    return '';
+  }
+  
+  // 只对最后一条用户消息之前的历史计算 hash
+  const history = messages.slice(0, lastUserIndex);
+  return hashMessages(history);
+}
+
 export async function getOrCreateSession(
   accountId: string,
   clientSessionId: string,
@@ -55,7 +77,7 @@ export async function getOrCreateSession(
         // 2. 创建新会话
         const id = uuidv4();
         const conversationId = uuidv4().replace(/-/g, '');
-        const historyHash = hashMessages(messages);
+        const historyHash = hashHistoryOnly(messages as any[]);
         
         // 保持相同的 client_session_id，客户端无感知
         db.prepare(
@@ -72,11 +94,14 @@ export async function getOrCreateSession(
       console.log('[SESSION] ✓ New session created after reset:', result.id.slice(0, 8) + '...');
       return { conversationId: result.conversationId, reuseHistory: false, session };
     } else {
-      const currentHash = hashMessages(messages);
-      const reuseHistory = currentHash === existing.last_messages_hash;
+      // 只对历史部分计算 hash，不包含最后一条用户消息
+      const currentHistoryHash = hashHistoryOnly(messages as any[]);
+      const reuseHistory = currentHistoryHash === existing.last_messages_hash && currentHistoryHash !== '';
       db.prepare("UPDATE sessions SET last_used_at = datetime('now') WHERE id = ?").run(existing.id);
       console.log('[SESSION] ✓ Reusing session:', {
         reuseHistory,
+        historyHash: currentHistoryHash.slice(0, 8) + '...',
+        storedHash: (existing.last_messages_hash || '').slice(0, 8) + '...',
         hashMatch: reuseHistory
       });
       return { conversationId: existing.conversation_id, reuseHistory, session: existing };
@@ -94,7 +119,7 @@ export async function getOrCreateSession(
     
     const id = uuidv4();
     const conversationId = uuidv4().replace(/-/g, '');
-    const historyHash = hashMessages(messages);
+    const historyHash = hashHistoryOnly(messages as any[]);
     
     // 使用 INSERT OR IGNORE 防止并发插入冲突
     const result = db.prepare(
@@ -138,9 +163,10 @@ export async function getOrCreateSession(
 export function updateSessionTokens(
   sessionId: string,
   promptTokens: number,
-  messagesHash: string,
-  msgCount: number
+  messages: any[]
 ) {
+  const historyHash = hashHistoryOnly(messages);
+  const msgCount = messages.length;
   db.prepare(
     `UPDATE sessions SET
        cumulative_prompt_tokens = cumulative_prompt_tokens + ?,
@@ -148,7 +174,7 @@ export function updateSessionTokens(
        last_msg_count = ?,
        last_used_at = datetime('now')
      WHERE id = ?`
-  ).run(promptTokens, messagesHash, msgCount, sessionId);
+  ).run(promptTokens, historyHash, msgCount, sessionId);
 }
 
 export function expireSession(sessionId: string) {
