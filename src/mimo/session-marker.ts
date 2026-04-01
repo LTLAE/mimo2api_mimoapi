@@ -6,7 +6,7 @@ const ZW = [
   '\u200c', // 1
   '\u200d', // 2
   '\ufeff', // 3
-  '\u180e', // 4
+  '\u2060', // 4
 ];
 
 const ZW_TO_IDX: Record<string, number> = {};

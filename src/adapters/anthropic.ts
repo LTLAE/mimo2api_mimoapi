@@ -14,6 +14,16 @@ import { toAnthropicToolUse } from '../tools/format.js';
 import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
 import { Account } from '../accounts.js';
 
+const MODEL_MAP: Record<string, string> = {
+  'mimo-v2-pro': 'mimo-v2-pro',
+  'mimo-v2-flash-studio': 'mimo-v2-flash-studio',
+  'mimo-v2-omni': 'mimo-v2-omni',
+};
+
+function resolveModel(model: string): string {
+  return MODEL_MAP[model] ?? 'mimo-v2-pro';
+}
+
 function logRequest(data: {
   account_id: string;
   session_id: string | null;
@@ -115,7 +125,7 @@ export function registerAnthropic(app: Hono) {
     const body = await c.req.json();
     console.log('[ANT] tools:', JSON.stringify(body.tools?.map((t: Record<string,unknown>) => t.name ?? t.function) ?? null));
     const medias = await extractImagesAnthropic(account, body);
-    const mimoModel = (body.model && typeof body.model === 'string' && body.model.startsWith('mimo-')) ? body.model : 'mimo-v2-pro';
+    const mimoModel = resolveModel(body.model ?? '');
     const isStream: boolean = body.stream ?? false;
     const enableThinking: boolean = body.thinking?.type === 'enabled';
     const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;

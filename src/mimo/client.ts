@@ -29,8 +29,12 @@ export async function* callMimo(
     msgId: uuidv4().replace(/-/g, '').slice(0, 32),
     conversationId,
     query,
-    modelConfig: { enableThinking, webSearchStatus: 'disabled', model },
-    multiMedias,
+    modelConfig: {
+      model,
+      enableThinking,
+      webSearchStatus: 'disabled'
+    },
+    multiMedias: multiMedias || [],
   };
 
   const url = `${API_URL}?xiaomichatbot_ph=${encodeURIComponent(account.ph_token)}`;
@@ -47,7 +51,9 @@ export async function* callMimo(
     body: JSON.stringify(body),
   });
 
-  if (!resp.ok) throw new Error(`MiMo error: ${resp.status}`);
+  if (!resp.ok) {
+    throw new Error(`MiMo error: ${resp.status}`);
+  }
   if (!resp.body) throw new Error('No response body');
 
   const reader = resp.body.getReader();
