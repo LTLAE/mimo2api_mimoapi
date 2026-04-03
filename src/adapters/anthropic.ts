@@ -239,7 +239,10 @@ export function registerAnthropic(app: Hono) {
                     const thinkPart = text.slice(0, closeIdx);
                     const afterThink = text.slice(closeIdx + 8).trimStart();
                     if (config.thinkMode === 'separate') {
-                      if (thinkPart) await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
+                      if (thinkPart) {
+                        console.log('[DBG] Sending thinking_delta:', JSON.stringify(thinkPart.slice(0, 50)));
+                        await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
+                      }
                       await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
                       await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
                     } else if (config.thinkMode === 'passthrough') {
@@ -249,7 +252,10 @@ export function registerAnthropic(app: Hono) {
                     if (afterThink) { text = afterThink; } else { continue; }
                   } else {
                     if (config.thinkMode === 'separate') {
-                      if (text) await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
+                      if (text) {
+                        console.log('[DBG] Sending thinking_delta chunk:', JSON.stringify(text.slice(0, 50)));
+                        await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
+                      }
                     } else if (config.thinkMode === 'passthrough') {
                       thinkBuf += text;
                     }
