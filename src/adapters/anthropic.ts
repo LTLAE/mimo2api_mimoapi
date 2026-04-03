@@ -3,9 +3,7 @@ import { stream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
 import { getAccountByApiKey, getLeastBusyAccount, incrementActive, decrementActive, markAccountInactive } from '../accounts.js';
 import { callMimo, MimoUsage } from '../mimo/client.js';
-import { getOrCreateSession, updateSessionTokens } from '../mimo/session.js';
-import { serializeMessages, extractLastUserMessage, ChatMessage } from '../mimo/serialize.js';
-import { encodeSessionId, decodeSessionIdFromMessages } from '../mimo/session-marker.js';
+import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
 import { config } from '../config.js';
 import { db } from '../db.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
@@ -26,7 +24,6 @@ function resolveModel(model: string): string {
 
 function logRequest(data: {
   account_id: string;
-  session_id: string | null;
   usage: MimoUsage | null;
   status: 'success' | 'error';
   error?: string;
@@ -34,9 +31,9 @@ function logRequest(data: {
 }) {
   db.prepare(
     `INSERT INTO request_logs (id, account_id, session_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
-     VALUES (?, ?, ?, 'anthropic', 'mimo-v2-pro', ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, NULL, 'anthropic', 'mimo-v2-pro', ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    uuidv4(), data.account_id, data.session_id,
+    uuidv4(), data.account_id,
     data.usage?.promptTokens ?? null, data.usage?.completionTokens ?? null,
     data.usage?.reasoningTokens ?? null, data.duration_ms,
     data.status, data.error ?? null, new Date().toLocaleString('sv-SE')
@@ -102,10 +99,7 @@ function processThinkContent(text: string): { thinkContent: string; mainContent:
   const start = text.indexOf('<think>');
   const end = text.indexOf('</think>');
   if (start !== -1 && end !== -1) {
-    return {
-      thinkContent: text.slice(start + 7, end),
-      mainContent: text.slice(end + 8).trimStart(),
-    };
+    return { thinkContent: text.slice(start + 7, end), mainContent: text.slice(end + 8).trimStart() };
   }
   return { thinkContent: '', mainContent: text };
 }
@@ -115,29 +109,16 @@ export function registerAnthropic(app: Hono) {
     console.log('\n[REQ] ========== New Anthropic Request ==========');
     console.log('[REQ] Time:', new Date().toISOString());
     console.log('[REQ] Method:', c.req.method, 'Path:', c.req.path);
-    
-    const authHeader = c.req.header('x-api-key') ?? c.req.header('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
-    const clientSessionId = c.req.header('X-Session-ID');
 
-    console.log('[REQ] Headers:', {
-      hasAuth: !!authHeader,
-      apiKeyPrefix: authHeader ? authHeader.slice(0, 8) + '...' : 'none',
-      sessionId: clientSessionId || 'none',
-      contentType: c.req.header('Content-Type')
-    });
+    const authHeader = c.req.header('x-api-key') ?? c.req.header('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
+    console.log('[REQ] Headers:', { hasAuth: !!authHeader, apiKeyPrefix: authHeader ? authHeader.slice(0, 8) + '...' : 'none', contentType: c.req.header('Content-Type') });
 
     const account = authHeader ? getAccountByApiKey(authHeader) : getLeastBusyAccount();
     if (!account) {
       console.log('[REQ] ❌ No account available');
       return c.json({ type: 'error', error: { type: 'authentication_error', message: 'Unauthorized' } }, 401);
     }
-
-    console.log('[REQ] ✓ Account found:', {
-      id: account.id.slice(0, 8) + '...',
-      alias: account.alias || 'no-alias',
-      activeRequests: account.active_requests,
-      maxConcurrent: config.maxConcurrentPerAccount
-    });
+    console.log('[REQ] ✓ Account found:', { id: account.id.slice(0, 8) + '...', alias: account.alias || 'no-alias', activeRequests: account.active_requests });
 
     if (account.active_requests >= config.maxConcurrentPerAccount) {
       console.log('[REQ] ❌ Rate limit exceeded');
@@ -145,14 +126,9 @@ export function registerAnthropic(app: Hono) {
     }
 
     const body = await c.req.json();
-    console.log('[REQ] Body parsed:', {
-      model: body.model || 'default',
-      stream: body.stream ?? false,
-      messages: body.messages?.length || 0,
-      tools: body.tools?.length || 0,
-      thinking: body.thinking?.type === 'enabled'
-    });
+    console.log('[REQ] Body parsed:', { model: body.model || 'default', stream: body.stream ?? false, messages: body.messages?.length || 0, tools: body.tools?.length || 0, thinking: body.thinking?.type === 'enabled' });
     console.log('[ANT] tools:', JSON.stringify(body.tools?.map((t: Record<string,unknown>) => t.name ?? t.function) ?? null));
+
     const medias = await extractImagesAnthropic(account, body);
     const mimoModel = resolveModel(body.model ?? '');
     const isStream: boolean = body.stream ?? false;
@@ -168,64 +144,18 @@ export function registerAnthropic(app: Hono) {
         messages = [{ role: 'system', content: toolPrompt }, ...messages];
       }
     }
+
     const startTime = Date.now();
     const msgId = `msg_${uuidv4().replace(/-/g, '')}`;
-
     console.log('[REQ] 🚀 Starting request processing...');
     incrementActive(account.id);
-    let sessionId: string | null = null;
     let lastUsage: MimoUsage | null = null;
 
     try {
-      let conversationId: string;
-      let query: string;
+      const conversationId = uuidv4().replace(/-/g, '');
+      const query = serializeMessages(messages);
+      console.log('[MIMO] Calling MiMo API...', { model: mimoModel, thinking: enableThinking, queryLength: query.length, hasMedia: medias.length > 0 });
 
-      const bodyMsgsRaw = (body.messages as unknown[]) ?? [];
-      const embeddedSessionId = decodeSessionIdFromMessages(bodyMsgsRaw);
-      const effectiveSessionKey = clientSessionId ?? embeddedSessionId;
-      let effectiveClientSessionId: string;
-      
-      console.log('[SESSION] Session key:', effectiveSessionKey ? effectiveSessionKey.slice(0, 16) + '...' : 'none (new session)');
-      
-      if (effectiveSessionKey) {
-        console.log('[SESSION] Looking up existing session...');
-        const { conversationId: cid, reuseHistory, session } = await getOrCreateSession(account.id, effectiveSessionKey, messages);
-        conversationId = cid;
-        sessionId = session.id;
-        effectiveClientSessionId = session.client_session_id;
-        // when tools are present, always send full messages so the tool definitions are included
-        query = (reuseHistory && !tools) ? extractLastUserMessage(messages) : serializeMessages(messages);
-        console.log('[SESSION] ✓ Session found:', {
-          sessionId: sessionId.slice(0, 8) + '...',
-          conversationId: conversationId.slice(0, 8) + '...',
-          reuseHistory,
-          tokens: session.cumulative_prompt_tokens
-        });
-      } else {
-        console.log('[SESSION] Creating new session (first request)...');
-        // 生成新的会话标识
-        conversationId = uuidv4().replace(/-/g, '');
-        effectiveClientSessionId = conversationId;
-        
-        // 调用 getOrCreateSession 创建数据库记录
-        const { session } = await getOrCreateSession(account.id, effectiveClientSessionId, messages);
-        sessionId = session.id;
-        
-        query = serializeMessages(messages);
-        console.log('[SESSION] ✓ New session created:', {
-          sessionId: sessionId.slice(0, 8) + '...',
-          conversationId: conversationId.slice(0, 8) + '...',
-          clientSessionId: effectiveClientSessionId.slice(0, 16) + '...'
-        });
-      }
-
-      console.log('[MIMO] Calling MiMo API...', {
-        model: mimoModel,
-        thinking: enableThinking,
-        queryLength: query.length,
-        hasMedia: medias.length > 0
-      });
-      
       const gen = callMimo(account, conversationId, query, enableThinking, mimoModel, medias);
 
       if (isStream) {
@@ -237,8 +167,7 @@ export function registerAnthropic(app: Hono) {
           let pingTimer: NodeJS.Timeout | null = null;
           let isAborted = false;
           let eventCount = 0;
-          
-          // 监听客户端断开
+
           const req = c.req.raw as any;
           if (req.on) {
             req.on('close', () => {
@@ -247,9 +176,9 @@ export function registerAnthropic(app: Hono) {
               console.log('[STREAM] ⚠️ Client disconnected after', eventCount, 'events');
             });
           }
-          
+
           const sendEvent = async (event: string, data: unknown) => {
-            if (isAborted) return;  // 客户端已断开，不再发送
+            if (isAborted) return;
             try {
               await s.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
               eventCount++;
@@ -259,276 +188,160 @@ export function registerAnthropic(app: Hono) {
               throw err;
             }
           };
-          
+
           try {
             console.log('[STREAM] Waiting for MiMo response...');
             await sendEvent('message_start', {
               type: 'message_start',
               message: { id: msgId, type: 'message', role: 'assistant', content: [], model: 'mimo-v2-pro', stop_reason: null, usage: { input_tokens: 0, output_tokens: 0 } },
             });
-            let thinkBuf = '';    // only used for passthrough accumulation
+            let thinkBuf = '';
             let pastThink = false;
             let thinkingStarted = false;
             let firstBlockSent = false;
             let toolCallBuf: string | null = null;
             let pendingText = '';
-            let earlyCut = false;
-            pingTimer = setInterval(async () => { 
+            pingTimer = setInterval(async () => {
               if (!isAborted) {
-                try {
-                  await s.write(': ping\n\n');
-                } catch (err) {
-                  console.error('[STREAM] Ping error:', err);
-                  isAborted = true;
-                  if (pingTimer) clearInterval(pingTimer);
-                }
+                try { await s.write(': ping\n\n'); }
+                catch (err) { console.error('[STREAM] Ping error:', err); isAborted = true; if (pingTimer) clearInterval(pingTimer); }
               }
             }, 5000);
-            
+
             for await (const chunk of gen) {
-              if (isAborted) {
-                console.log('[STREAM] Aborted, stopping generation');
-                break;
-              }
-              
+              if (isAborted) { console.log('[STREAM] Aborted, stopping generation'); break; }
+
               if (chunk.type === 'text') {
-              let text = (chunk.content ?? '').replace(/\u0000/g, '');
-              if (text) console.log('[DBG] chunk:', JSON.stringify(text.slice(0, 80)), 'pastThink:', pastThink, 'tcBuf:', toolCallBuf !== null);
-              if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) {
-                pastThink = true;
-                if (!firstBlockSent) {
-                  await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-                  firstBlockSent = true;
-                }
-              }
-              if (!pastThink) {
-                // strip leading <think> tag from first chunk
-                if (!thinkingStarted && text.includes('<think>')) {
-                  thinkingStarted = true;
-                  text = text.replace('<think>', '');
-                  if (config.thinkMode === 'separate') {
-                    await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } });
-                    firstBlockSent = true;
-                  } else if (!firstBlockSent) {
+                let text = (chunk.content ?? '').replace(/\u0000/g, '');
+                if (text) console.log('[DBG] chunk:', JSON.stringify(text.slice(0, 80)), 'pastThink:', pastThink, 'tcBuf:', toolCallBuf !== null);
+                if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) {
+                  pastThink = true;
+                  if (!firstBlockSent) {
                     await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
                     firstBlockSent = true;
                   }
                 }
-                const closeIdx = text.indexOf('</think>');
-                if (closeIdx !== -1) {
-                  pastThink = true;
-                  const thinkPart = text.slice(0, closeIdx);
-                  const afterThink = text.slice(closeIdx + 8).trimStart();
-                  if (config.thinkMode === 'separate') {
-                    if (thinkPart) await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
-                    await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
-                    await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
-                  } else if (config.thinkMode === 'passthrough') {
-                    thinkBuf += thinkPart;
-                    await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
+                if (!pastThink) {
+                  if (!thinkingStarted && text.includes('<think>')) {
+                    thinkingStarted = true;
+                    text = text.replace('<think>', '');
+                    if (config.thinkMode === 'separate') {
+                      await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } });
+                      firstBlockSent = true;
+                    } else if (!firstBlockSent) {
+                      await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+                      firstBlockSent = true;
+                    }
                   }
-                  // route afterThink through pendingText for tool call detection
-                  if (afterThink) {
-                    // 将 afterThink 重新赋值给 text，继续处理（不要 continue）
-                    text = afterThink;
-                    // 注意：这里不能 continue，需要继续执行到下面的 pastThink 处理逻辑
+                  const closeIdx = text.indexOf('</think>');
+                  if (closeIdx !== -1) {
+                    pastThink = true;
+                    const thinkPart = text.slice(0, closeIdx);
+                    const afterThink = text.slice(closeIdx + 8).trimStart();
+                    if (config.thinkMode === 'separate') {
+                      if (thinkPart) await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: thinkPart } });
+                      await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
+                      await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
+                    } else if (config.thinkMode === 'passthrough') {
+                      thinkBuf += thinkPart;
+                      await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
+                    }
+                    if (afterThink) { text = afterThink; } else { continue; }
                   } else {
-                    continue;  // 如果没有 afterThink，跳过本次循环
+                    if (config.thinkMode === 'separate') {
+                      if (text) await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
+                    } else if (config.thinkMode === 'passthrough') {
+                      thinkBuf += text;
+                    }
+                    continue;
                   }
-                } else {
-                  // still inside think
-                  if (config.thinkMode === 'separate') {
-                    if (text) await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } });
-                  } else if (config.thinkMode === 'passthrough') {
-                    thinkBuf += text;
-                  }
-                  // strip: discard
-                  continue;  // 跳过本次循环，不处理 pastThink 分支
                 }
-              }
-              
-              // pastThink 处理逻辑（无论是一开始就 pastThink，还是刚刚设置的）
-              if (pastThink) {
-                // strip any second <think>...</think> blocks that leak through after pastThink
-                text = text.replace(/<think>[\s\S]*?<\/think>/g, '');
-                const t2Idx = text.indexOf('<think>');
-                if (t2Idx !== -1) text = text.slice(0, t2Idx);
-                if (!text) continue;
-                // past think, stream as text
-                const idx = config.thinkMode === 'separate' ? 1 : 0;
-                if (toolCallBuf !== null) {
-                  toolCallBuf += text;
-                } else {
-                  pendingText += text;
-                  const fc1 = pendingText.indexOf('<function_calls>'), fc2 = pendingText.indexOf('<tool_call>');
-                  const fcIdx = fc1 === -1 ? fc2 : fc2 === -1 ? fc1 : Math.min(fc1, fc2);
 
-                  if (fcIdx !== -1) {
-                    // 只要检测到开始标记，就把之前安全的文本发出去，然后转入工具收集模式
-                    const before = pendingText.slice(0, fcIdx);
-                    if (before) await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: before } });
-                    toolCallBuf = pendingText.slice(fcIdx);
-                    pendingText = '';
+                if (pastThink) {
+                  text = text.replace(/<think>[\s\S]*?<\/think>/g, '');
+                  const t2Idx = text.indexOf('<think>');
+                  if (t2Idx !== -1) text = text.slice(0, t2Idx);
+                  if (!text) continue;
+                  const idx = config.thinkMode === 'separate' ? 1 : 0;
+                  if (toolCallBuf !== null) {
+                    toolCallBuf += text;
                   } else {
-                    // 保持一个缓冲区（比如 15 字符），防止标签被截断时被错误发出
-                    const safeLen = Math.max(0, pendingText.length - 15);
-                    if (safeLen > 0) {
-                      const safe = pendingText.slice(0, safeLen);
-                      await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: safe } });
-                      pendingText = pendingText.slice(safeLen);
+                    pendingText += text;
+                    const fc1 = pendingText.indexOf('<function_calls>'), fc2 = pendingText.indexOf('<tool_call>');
+                    const fcIdx = fc1 === -1 ? fc2 : fc2 === -1 ? fc1 : Math.min(fc1, fc2);
+                    if (fcIdx !== -1) {
+                      const before = pendingText.slice(0, fcIdx);
+                      if (before) await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: before } });
+                      toolCallBuf = pendingText.slice(fcIdx);
+                      pendingText = '';
+                    } else {
+                      const safeLen = Math.max(0, pendingText.length - 15);
+                      if (safeLen > 0) {
+                        await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: pendingText.slice(0, safeLen) } });
+                        pendingText = pendingText.slice(safeLen);
+                      }
                     }
                   }
                 }
-              }
-            } else if (chunk.type === 'usage') {
-              lastUsage = chunk.usage!;
-            } else if (chunk.type === 'finish') {
-              // ensure at least one block was opened before we close it
-              if (!firstBlockSent) {
-                await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-                firstBlockSent = true;
-                pastThink = true;
-              }
-              // handle unclosed <think> block (MiMo sometimes omits closing tag)
-              if (!pastThink && thinkingStarted) {
-                pastThink = true;
-                if (config.thinkMode === 'separate') {
-                  // thinking content already sent incrementally; close thinking block and open text block
-                  await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
-                  await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
-                } else if (config.thinkMode === 'passthrough') {
-                  await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
+              } else if (chunk.type === 'usage') {
+                lastUsage = chunk.usage!;
+              } else if (chunk.type === 'finish') {
+                if (!firstBlockSent) {
+                  await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+                  firstBlockSent = true; pastThink = true;
                 }
-                // strip: discard thinkBuf
-              }
-              // flush pending buffer
-              if (pendingText) {
-                const idx2 = config.thinkMode === 'separate' ? 1 : 0;
-                if (toolCallBuf !== null) toolCallBuf += pendingText;
-                else if (hasToolCallMarker(pendingText)) toolCallBuf = pendingText;
-                else { const i = idx2; await sendEvent('content_block_delta', { type: 'content_block_delta', index: i, delta: { type: 'text_delta', text: pendingText } }); }
-                pendingText = '';
-              }
-              // close the last active block
-              const lastIdx = config.thinkMode === 'separate' && pastThink ? 1 : 0;
-              // 在关闭 block 前附加零宽标记，保证客户端能收到
-              await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: encodeSessionId(effectiveClientSessionId) } });
-              await sendEvent('content_block_stop', { type: 'content_block_stop', index: lastIdx });
-              let stopReason = 'end_turn';
-              if (toolCallBuf && hasToolCallMarker(toolCallBuf)) {
-                const calls = parseToolCalls(toolCallBuf);
-                if (calls.length > 0) {
-                  stopReason = 'tool_use';
-                  const toolUseBlocks = toAnthropicToolUse(calls);
-                  for (let i = 0; i < toolUseBlocks.length; i++) {
-                    const blockIdx = lastIdx + 1 + i;
-                    await sendEvent('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: toolUseBlocks[i].id, name: toolUseBlocks[i].name, input: {} } });
-                    await sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUseBlocks[i].input) } });
-                    await sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIdx });
+                if (!pastThink && thinkingStarted) {
+                  pastThink = true;
+                  if (config.thinkMode === 'separate') {
+                    await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
+                    await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
+                  } else if (config.thinkMode === 'passthrough') {
+                    await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
                   }
-                } else {
-                  // parse failed — emit raw as text fallback
-                  await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: toolCallBuf } });
                 }
-              }
-              clearInterval(pingTimer);
-              await sendEvent('message_delta', {
-                type: 'message_delta',
-                delta: { stop_reason: stopReason, stop_sequence: null },
-                usage: { output_tokens: lastUsage?.completionTokens ?? 0 },
-              });
-              await sendEvent('message_stop', { type: 'message_stop' });
-              console.log('[STREAM] ✓ Completed:', {
-                events: eventCount,
-                stopReason,
-                tokens: lastUsage?.totalTokens || 0,
-                duration: Date.now() - startTime + 'ms'
-              });
-            }
-          }
-          // earlyCut: loop broke early on tool call completion, run finish logic now
-          if (earlyCut) {
-            if (!firstBlockSent) {
-              await sendEvent('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-              firstBlockSent = true;
-              pastThink = true;
-            }
-            if (!pastThink && thinkingStarted) {
-              pastThink = true;
-              if (config.thinkMode === 'separate') {
-                await sendEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
-                await sendEvent('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } });
-              } else if (config.thinkMode === 'passthrough') {
-                await sendEvent('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '<think>' + thinkBuf + '</think>' } });
-              }
-            }
-            if (pendingText) {
-              const idx2 = (config.thinkMode === 'separate' && pastThink) ? 1 : 0;
-              if (toolCallBuf !== null) {
-                toolCallBuf += pendingText;
-              } else if (hasToolCallMarker(pendingText)) {
-                toolCallBuf = pendingText;
-              } else {
-                await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx2, delta: { type: 'text_delta', text: pendingText } });
-              }
-              pendingText = '';
-            }
-            const lastIdx = config.thinkMode === 'separate' && pastThink ? 1 : 0;
-            // 在关闭 block 前附加零宽标记
-            await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: encodeSessionId(effectiveClientSessionId) } });
-            await sendEvent('content_block_stop', { type: 'content_block_stop', index: lastIdx });
-            let stopReason = 'end_turn';
-            if (toolCallBuf && hasToolCallMarker(toolCallBuf)) {
-              const calls = parseToolCalls(toolCallBuf);
-              if (calls.length > 0) {
-                stopReason = 'tool_use';
-                const toolUseBlocks = toAnthropicToolUse(calls);
-                for (let i = 0; i < toolUseBlocks.length; i++) {
-                  const blockIdx = lastIdx + 1 + i;
-                  await sendEvent('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: toolUseBlocks[i].id, name: toolUseBlocks[i].name, input: {} } });
-                  await sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUseBlocks[i].input) } });
-                  await sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIdx });
+                if (pendingText) {
+                  const idx2 = config.thinkMode === 'separate' ? 1 : 0;
+                  if (toolCallBuf !== null) toolCallBuf += pendingText;
+                  else if (hasToolCallMarker(pendingText)) toolCallBuf = pendingText;
+                  else await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx2, delta: { type: 'text_delta', text: pendingText } });
+                  pendingText = '';
                 }
-              } else {
-                // 如果解析失败，把原始内容作为文本发出去，防止内容丢失
-                await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: toolCallBuf } });
+                const lastIdx = config.thinkMode === 'separate' && pastThink ? 1 : 0;
+                await sendEvent('content_block_stop', { type: 'content_block_stop', index: lastIdx });
+                let stopReason = 'end_turn';
+                if (toolCallBuf && hasToolCallMarker(toolCallBuf)) {
+                  const calls = parseToolCalls(toolCallBuf);
+                  if (calls.length > 0) {
+                    stopReason = 'tool_use';
+                    const toolUseBlocks = toAnthropicToolUse(calls);
+                    for (let i = 0; i < toolUseBlocks.length; i++) {
+                      const blockIdx = lastIdx + 1 + i;
+                      await sendEvent('content_block_start', { type: 'content_block_start', index: blockIdx, content_block: { type: 'tool_use', id: toolUseBlocks[i].id, name: toolUseBlocks[i].name, input: {} } });
+                      await sendEvent('content_block_delta', { type: 'content_block_delta', index: blockIdx, delta: { type: 'input_json_delta', partial_json: JSON.stringify(toolUseBlocks[i].input) } });
+                      await sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIdx });
+                    }
+                  } else {
+                    await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: toolCallBuf } });
+                  }
+                }
+                clearInterval(pingTimer!);
+                await sendEvent('message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: lastUsage?.completionTokens ?? 0 } });
+                await sendEvent('message_stop', { type: 'message_stop' });
+                console.log('[STREAM] ✓ Completed:', { events: eventCount, stopReason, tokens: lastUsage?.totalTokens || 0, duration: Date.now() - startTime + 'ms' });
               }
             }
-            clearInterval(pingTimer);
-            await sendEvent('message_delta', {
-              type: 'message_delta',
-              delta: { stop_reason: stopReason, stop_sequence: null },
-              usage: { output_tokens: lastUsage?.completionTokens ?? 0 },
-            });
-            await sendEvent('message_stop', { type: 'message_stop' });
-          } else {
-            if (pingTimer) clearInterval(pingTimer);
-          }
-          
           } catch (err) {
             console.error('[STREAM] ❌ Error during streaming:', err);
-            // 尝试发送错误事件（如果连接还在）
             if (!isAborted) {
-              try {
-                await sendEvent('error', {
-                  type: 'error',
-                  error: { type: 'api_error', message: String(err) }
-                });
-              } catch (e) {
-                console.error('[STREAM] Failed to send error event:', e);
-              }
+              try { await sendEvent('error', { type: 'error', error: { type: 'api_error', message: String(err) } }); } catch {}
             }
-            logRequest({ account_id: account.id, session_id: sessionId, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
           } finally {
-            // 确保清理定时器
             if (pingTimer) clearInterval(pingTimer);
           }
-          
-          if (sessionId && lastUsage) {
-            updateSessionTokens(sessionId, lastUsage.promptTokens, messages);
-          }
+
           if (!isAborted) {
-            logRequest({ account_id: account.id, session_id: sessionId, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
           }
         });
       }
@@ -540,26 +353,17 @@ export function registerAnthropic(app: Hono) {
         if (chunk.type === 'text') fullText += chunk.content ?? '';
         else if (chunk.type === 'usage') lastUsage = chunk.usage!;
       }
-
       if (config.thinkMode === 'strip') {
         fullText = fullText.replace(/<think>[\s\S]*?<\/think>/g, '').trimStart();
       }
-
       const content: unknown[] = [];
-      const marker = encodeSessionId(effectiveClientSessionId);
       if (config.thinkMode === 'separate') {
         const { thinkContent, mainContent } = processThinkContent(fullText);
         if (thinkContent) content.push({ type: 'thinking', thinking: thinkContent });
-        content.push({ type: 'text', text: mainContent + marker });
+        content.push({ type: 'text', text: mainContent });
       } else {
-        content.push({ type: 'text', text: fullText + marker });
+        content.push({ type: 'text', text: fullText });
       }
-
-      if (sessionId && lastUsage) {
-        updateSessionTokens(sessionId, lastUsage.promptTokens, messages);
-      }
-      logRequest({ account_id: account.id, session_id: sessionId, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
-
       let stopReason = 'end_turn';
       if (hasToolCallMarker(fullText)) {
         const calls = parseToolCalls(fullText);
@@ -568,7 +372,7 @@ export function registerAnthropic(app: Hono) {
           for (const block of toAnthropicToolUse(calls)) content.push(block);
         }
       }
-
+      logRequest({ account_id: account.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
       return c.json({
         id: msgId, type: 'message', role: 'assistant', content,
         model: 'mimo-v2-pro', stop_reason: stopReason, stop_sequence: null,
@@ -577,7 +381,7 @@ export function registerAnthropic(app: Hono) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('401') || msg.includes('403')) markAccountInactive(account.id);
-      logRequest({ account_id: account.id, session_id: sessionId, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
       return c.json({ type: 'error', error: { type: 'api_error', message: msg } }, 502);
     } finally {
       decrementActive(account.id);
