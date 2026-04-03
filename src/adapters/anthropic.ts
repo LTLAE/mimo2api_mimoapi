@@ -11,6 +11,8 @@ import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
 import { toAnthropicToolUse } from '../tools/format.js';
 import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
 import { Account } from '../accounts.js';
+import { getOrCreateSession, updateSessionTokens } from '../mimo/session.js';
+import { generateClientSessionId } from '../mimo/session-marker.js';
 
 const MODEL_MAP: Record<string, string> = {
   'mimo-v2-pro': 'mimo-v2-pro',
@@ -152,7 +154,22 @@ export function registerAnthropic(app: Hono) {
     let lastUsage: MimoUsage | null = null;
 
     try {
-      const conversationId = uuidv4().replace(/-/g, '');
+      // 1. 生成客户端会话标识（备用）
+      const clientSessionId = generateClientSessionId(c, account.id);
+      
+      // 2. 获取或创建会话（基于消息历史连续性）
+      const { conversationId, session } = await getOrCreateSession(
+        account.id,
+        clientSessionId,
+        messages
+      );
+      
+      console.log('[SESSION] Using conversation:', {
+        conversationId: conversationId.slice(0, 16) + '...',
+        sessionId: session.id.slice(0, 8) + '...',
+        cumulativeTokens: session.cumulative_prompt_tokens
+      });
+      
       const query = serializeMessages(messages);
       console.log('[MIMO] Calling MiMo API...', { model: mimoModel, thinking: enableThinking, queryLength: query.length, hasMedia: medias.length > 0 });
 
@@ -268,6 +285,7 @@ export function registerAnthropic(app: Hono) {
                   const t2Idx = text.indexOf('<think>');
                   if (t2Idx !== -1) text = text.slice(0, t2Idx);
                   if (!text) continue;
+                  
                   const idx = config.thinkMode === 'separate' ? 1 : 0;
                   if (toolCallBuf !== null) {
                     toolCallBuf += text;
@@ -348,6 +366,10 @@ export function registerAnthropic(app: Hono) {
 
           if (!isAborted) {
             logRequest({ account_id: account.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+            // 更新会话 token 统计
+            if (lastUsage) {
+              updateSessionTokens(session.id, lastUsage.promptTokens);
+            }
           }
         });
       }
@@ -359,6 +381,7 @@ export function registerAnthropic(app: Hono) {
         if (chunk.type === 'text') fullText += chunk.content ?? '';
         else if (chunk.type === 'usage') lastUsage = chunk.usage!;
       }
+      
       if (config.thinkMode === 'strip') {
         fullText = fullText.replace(/<think>[\s\S]*?<\/think>/g, '').trimStart();
       }
@@ -379,6 +402,10 @@ export function registerAnthropic(app: Hono) {
         }
       }
       logRequest({ account_id: account.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+      // 更新会话 token 统计
+      if (lastUsage) {
+        updateSessionTokens(session.id, lastUsage.promptTokens);
+      }
       return c.json({
         id: msgId, type: 'message', role: 'assistant', content,
         model: 'mimo-v2-pro', stop_reason: stopReason, stop_sequence: null,

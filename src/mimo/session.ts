@@ -1,180 +1,202 @@
 import { db } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
-import { createHash } from 'crypto';
 import { config } from '../config.js';
+import { calculateMessageFingerprint } from './session-marker.js';
 
 export interface Session {
   id: string;
   account_id: string;
   client_session_id: string;
   conversation_id: string;
-  last_messages_hash: string | null;
-  last_msg_count: number;
   cumulative_prompt_tokens: number;
+  last_message_fingerprint: string;
   is_expired: number;
   created_at: string;
   last_used_at: string;
 }
 
-function hashMessages(messages: unknown[]): string {
-  return createHash('sha256').update(JSON.stringify(messages)).digest('hex');
-}
-
-// 只对历史消息（不包含最后一条用户消息）计算 hash
-// 这样当用户发送新消息时，历史部分的 hash 不变，可以复用 MiMo 的对话历史
-function hashHistoryOnly(messages: any[]): string {
-  // 找到最后一条用户消息的索引
-  let lastUserIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
-      lastUserIndex = i;
-      break;
-    }
-  }
-  
-  // 如果没有用户消息，或者只有一条消息，返回空 hash
-  if (lastUserIndex <= 0) {
-    return '';
-  }
-  
-  // 只对最后一条用户消息之前的历史计算 hash
-  const history = messages.slice(0, lastUserIndex);
-  return hashMessages(history);
-}
-
+/**
+ * 获取或创建会话（基于消息历史连续性）
+ * 
+ * 逻辑：
+ * 1. 计算当前消息的指纹
+ * 2. 查找是否有 session 的 last_message_fingerprint 是当前消息的前缀
+ * 3. 如果找到，说明当前消息包含了上次的历史 → 复用会话
+ * 4. 如果没找到 → 创建新会话
+ * 
+ * @param accountId - 账号ID
+ * @param clientSessionId - 客户端会话ID（用于创建新会话）
+ * @param messages - 当前请求的消息列表
+ */
 export async function getOrCreateSession(
   accountId: string,
   clientSessionId: string,
-  messages: unknown[]
-): Promise<{ conversationId: string; reuseHistory: boolean; session: Session }> {
+  messages: any[]
+): Promise<{ conversationId: string; session: Session }> {
+  const currentFingerprint = calculateMessageFingerprint(messages);
+  
   console.log('[SESSION] getOrCreateSession:', {
     accountId: accountId.slice(0, 8) + '...',
-    clientSessionId: clientSessionId.slice(0, 16) + '...',
-    messageCount: Array.isArray(messages) ? messages.length : 0
+    clientSessionId: clientSessionId.slice(0, 20) + '...',
+    messageCount: messages.length,
+    fingerprint: currentFingerprint.slice(0, 16) + '...'
   });
   
-  const existing = db.prepare(
-    'SELECT * FROM sessions WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
-  ).get(accountId, clientSessionId) as Session | undefined;
-
-  if (existing) {
-    console.log('[SESSION] Found existing session:', {
-      id: existing.id.slice(0, 8) + '...',
-      tokens: existing.cumulative_prompt_tokens,
-      threshold: config.contextResetThreshold
-    });
+  // 查找所有活跃的会话，检查消息连续性
+  const activeSessions = db.prepare(
+    'SELECT * FROM sessions WHERE account_id = ? AND is_expired = 0 ORDER BY last_used_at DESC LIMIT 10'
+  ).all(accountId) as Session[];
+  
+  console.log(`[SESSION] Found ${activeSessions.length} active sessions for this account`);
+  
+  for (const session of activeSessions) {
+    console.log(`[SESSION] Checking session ${session.id.slice(0, 8)}..., fingerprint: ${session.last_message_fingerprint.slice(0, 16)}...`);
     
-    if (existing.cumulative_prompt_tokens > config.contextResetThreshold) {
-      console.log('[SESSION] Token limit exceeded, resetting session...');
-      // Token 超限，需要重置会话
-      // 删除旧会话（而不是过期），避免 UNIQUE 约束冲突
-      const transaction = db.transaction(() => {
-        // 1. 删除当前会话（UNIQUE 约束不包含 is_expired，必须删除）
-        db.prepare(
-          'DELETE FROM sessions WHERE id = ?'
-        ).run(existing.id);
-        
-        // 2. 创建新会话
-        const id = uuidv4();
-        const conversationId = uuidv4().replace(/-/g, '');
-        const historyHash = hashHistoryOnly(messages as any[]);
-        
-        // 保持相同的 client_session_id，客户端无感知
-        db.prepare(
-          `INSERT INTO sessions
-           (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)
-           VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
-        ).run(id, accountId, clientSessionId, conversationId, historyHash, messages.length);
-        
-        return { id, conversationId, historyHash };
-      });
-      
-      const result = transaction();
-      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(result.id) as Session;
-      console.log('[SESSION] ✓ New session created after reset:', result.id.slice(0, 8) + '...');
-      return { conversationId: result.conversationId, reuseHistory: false, session };
-    } else {
-      // 只对历史部分计算 hash，不包含最后一条用户消息
-      const currentHistoryHash = hashHistoryOnly(messages as any[]);
-      const reuseHistory = currentHistoryHash === existing.last_messages_hash && currentHistoryHash !== '';
-      db.prepare("UPDATE sessions SET last_used_at = datetime('now') WHERE id = ?").run(existing.id);
-      console.log('[SESSION] ✓ Reusing session:', {
-        reuseHistory,
-        historyHash: currentHistoryHash.slice(0, 8) + '...',
-        storedHash: (existing.last_messages_hash || '').slice(0, 8) + '...',
-        hashMatch: reuseHistory
-      });
-      return { conversationId: existing.conversation_id, reuseHistory, session: existing };
-    }
-  }
-
-  console.log('[SESSION] No existing session, creating new...');
-  // 没有现有会话，创建新的
-  // 使用事务 + INSERT OR IGNORE 防止并发冲突
-  const transaction = db.transaction(() => {
-    // 先过期所有可能存在的旧会话（防止并发创建）
-    db.prepare(
-      'UPDATE sessions SET is_expired = 1 WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
-    ).run(accountId, clientSessionId);
-    
-    const id = uuidv4();
-    const conversationId = uuidv4().replace(/-/g, '');
-    const historyHash = hashHistoryOnly(messages as any[]);
-    
-    // 使用 INSERT OR IGNORE 防止并发插入冲突
-    const result = db.prepare(
-      `INSERT OR IGNORE INTO sessions
-       (id, account_id, client_session_id, conversation_id, last_messages_hash, last_msg_count, created_at, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
-    ).run(id, accountId, clientSessionId, conversationId, historyHash, messages.length);
-    
-    // 如果插入成功（changes > 0），返回新创建的 ID
-    // 如果插入失败（并发冲突），重新查询已存在的记录
-    if (result.changes > 0) {
-      return { id, conversationId, isNew: true };
-    } else {
-      // 并发冲突，另一个请求已经创建了记录，重新查询
-      console.log('[SESSION] ⚠️ Concurrent insert detected, re-querying...');
-      const existingSession = db.prepare(
-        'SELECT * FROM sessions WHERE account_id = ? AND client_session_id = ? AND is_expired = 0'
-      ).get(accountId, clientSessionId) as Session | undefined;
-      
-      if (existingSession) {
-        return { id: existingSession.id, conversationId: existingSession.conversation_id, isNew: false };
-      } else {
-        // 极端情况：记录被立即过期了，抛出错误
-        throw new Error('Session creation race condition: record disappeared');
+    // 检查当前消息是否包含上次的消息（通过比较指纹）
+    // 如果当前消息更长，且包含了之前的内容，说明是连续的
+    if (isMessageContinuation(messages, session.last_message_fingerprint)) {
+      // Token 超限检查
+      if (session.cumulative_prompt_tokens > config.contextResetThreshold && config.contextResetThreshold > 0) {
+        console.log('[SESSION] Token limit exceeded, creating new session...');
+        break; // 跳出循环，创建新会话
       }
+
+      // 复用现有会话，更新指纹
+      db.prepare(
+        `UPDATE sessions SET 
+           last_message_fingerprint = ?,
+           last_used_at = datetime('now')
+         WHERE id = ?`
+      ).run(currentFingerprint, session.id);
+      
+      console.log('[SESSION] ✓ Reusing session (message continuation detected):', {
+        id: session.id.slice(0, 8) + '...',
+        conversationId: session.conversation_id.slice(0, 16) + '...',
+        tokens: session.cumulative_prompt_tokens,
+        previousMsgCount: extractMessageCount(session.last_message_fingerprint),
+        currentMsgCount: messages.length
+      });
+      
+      // 重新获取更新后的 session
+      const updatedSession = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id) as Session;
+      return { conversationId: updatedSession.conversation_id, session: updatedSession };
     }
-  });
-  
-  const result = transaction();
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(result.id) as Session;
-  
-  if (result.isNew) {
-    console.log('[SESSION] ✓ New session created:', result.id.slice(0, 8) + '...');
-  } else {
-    console.log('[SESSION] ✓ Session created by concurrent request, reusing:', result.id.slice(0, 8) + '...');
   }
-  
-  return { conversationId: result.conversationId, reuseHistory: false, session };
+
+  // 没有找到连续的会话 → 创建新会话
+  console.log('[SESSION] No continuation found, creating new session...');
+  try {
+    return createNewSession(accountId, clientSessionId, currentFingerprint);
+  } catch (error) {
+    console.error('[SESSION] ❌ Error creating new session:', error);
+    throw error;
+  }
 }
 
-export function updateSessionTokens(
-  sessionId: string,
-  promptTokens: number,
-  messages: any[]
-) {
-  const historyHash = hashHistoryOnly(messages);
-  const msgCount = messages.length;
-  db.prepare(
-    `UPDATE sessions SET
-       cumulative_prompt_tokens = cumulative_prompt_tokens + ?,
-       last_messages_hash = ?,
-       last_msg_count = ?,
-       last_used_at = datetime('now')
-     WHERE id = ?`
-  ).run(promptTokens, historyHash, msgCount, sessionId);
+/**
+ * 检查消息是否是连续的
+ * 策略：检查当前消息的前 N 条是否与上次的指纹匹配
+ */
+function isMessageContinuation(currentMessages: any[], lastFingerprint: string): boolean {
+  // 如果是首次请求（没有历史指纹），不是连续
+  if (!lastFingerprint) return false;
+  
+  // 如果只有1条消息，无法判断连续性（可能是新对话）
+  if (currentMessages.length < 2) return false;
+  
+  // 尝试不同的切片长度，看是否能匹配上次的指纹
+  // 从最近的开始往前查找（因为最可能匹配最近的）
+  for (let i = currentMessages.length - 1; i >= 1; i--) {
+    const slice = currentMessages.slice(0, i);
+    const sliceFingerprint = calculateMessageFingerprint(slice);
+    
+    console.log(`[SESSION] Checking slice [0:${i}], fingerprint: ${sliceFingerprint.slice(0, 16)}... vs ${lastFingerprint.slice(0, 16)}...`);
+    
+    if (sliceFingerprint === lastFingerprint) {
+      console.log('[SESSION] ✓ Found continuation at message index:', i);
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * 从指纹中提取消息数量（用于日志）
+ */
+function extractMessageCount(fingerprint: string): string {
+  return 'N/A'; // 指纹中不包含消息数量，仅用于日志显示
+}
+
+/**
+ * 创建新会话
+ */
+function createNewSession(accountId: string, clientSessionId: string, messageFingerprint: string): { conversationId: string; session: Session } {
+  console.log('[SESSION] createNewSession called:', {
+    accountId: accountId.slice(0, 8) + '...',
+    clientSessionId: clientSessionId.slice(0, 20) + '...',
+    fingerprint: messageFingerprint.slice(0, 16) + '...'
+  });
+  
+  try {
+    const transaction = db.transaction(() => {
+      const id = uuidv4();
+      const conversationId = uuidv4().replace(/-/g, '');
+      
+      console.log('[SESSION] Deleting old sessions with same client_session_id...');
+      // 先删除旧的同名 session（如果存在）
+      const deleteResult = db.prepare(
+        `DELETE FROM sessions 
+         WHERE account_id = ? AND client_session_id = ? AND is_expired = 0`
+      ).run(accountId, clientSessionId);
+      console.log('[SESSION] Deleted', deleteResult.changes, 'old sessions');
+      
+      console.log('[SESSION] Inserting new session...');
+      // 创建新 session
+      db.prepare(
+        `INSERT INTO sessions
+         (id, account_id, client_session_id, conversation_id, last_message_fingerprint, created_at, last_used_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`
+      ).run(id, accountId, clientSessionId, conversationId, messageFingerprint);
+      
+      return { id, conversationId };
+    });
+    
+    const result = transaction();
+    const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(result.id) as Session;
+    
+    console.log('[SESSION] ✓ New session created:', {
+      id: result.id.slice(0, 8) + '...',
+      conversationId: result.conversationId.slice(0, 16) + '...',
+      fingerprint: messageFingerprint.slice(0, 16) + '...'
+    });
+    
+    return { conversationId: result.conversationId, session };
+  } catch (error) {
+    console.error('[SESSION] ❌ Error in createNewSession:', error);
+    throw error;
+  }
+}
+
+/**
+ * 更新会话 token 统计
+ */
+export function updateSessionTokens(sessionId: string, promptTokens: number) {
+  console.log('[SESSION] updateSessionTokens:', {
+    sessionId: sessionId.slice(0, 8) + '...',
+    promptTokens
+  });
+  
+  const transaction = db.transaction(() => {
+    db.prepare(
+      `UPDATE sessions SET
+         cumulative_prompt_tokens = cumulative_prompt_tokens + ?,
+         last_used_at = datetime('now')
+       WHERE id = ?`
+    ).run(promptTokens, sessionId);
+  });
+  
+  transaction();
 }
 
 export function expireSession(sessionId: string) {

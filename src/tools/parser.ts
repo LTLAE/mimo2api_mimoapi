@@ -80,9 +80,18 @@ function repairJson(json: string): string {
 function parseValue(val: string): unknown {
   if (!val) return '';
   
+  const trimmed = val.trim();
+  
+  // 处理 Python 风格的布尔值
+  if (trimmed === 'True' || trimmed === 'true') return true;
+  if (trimmed === 'False' || trimmed === 'false') return false;
+  
+  // 处理 Python 风格的 None
+  if (trimmed === 'None' || trimmed === 'null') return null;
+  
   // 尝试 JSON 解析
   try {
-    const parsed = JSON.parse(val);
+    const parsed = JSON.parse(trimmed);
     // 如果解析结果是字符串，尝试再次解析（处理双重编码的情况）
     if (typeof parsed === 'string' && (parsed.startsWith('{') || parsed.startsWith('['))) {
       try {
@@ -95,7 +104,7 @@ function parseValue(val: string): unknown {
   } catch {
     // 尝试修复后再解析
     try {
-      const repaired = JSON.parse(repairJson(val));
+      const repaired = JSON.parse(repairJson(trimmed));
       // 同样处理双重编码
       if (typeof repaired === 'string' && (repaired.startsWith('{') || repaired.startsWith('['))) {
         try {
@@ -107,7 +116,7 @@ function parseValue(val: string): unknown {
       return repaired;
     } catch {
       // 返回原始字符串
-      return val;
+      return trimmed;
     }
   }
 }

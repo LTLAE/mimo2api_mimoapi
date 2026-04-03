@@ -1,5 +1,4 @@
 import { config } from '../config.js';
-import { stripSessionMarker } from './session-marker.js';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -7,8 +6,6 @@ export interface ChatMessage {
 }
 
 export function serializeMessages(messages: ChatMessage[]): string {
-  // 清理掉所有历史消息中的零宽标记，防止叠加
-  messages = messages.map(m => ({ ...m, content: stripSessionMarker(m.content) }));
   const system = messages.filter(m => m.role === 'system');
   const rest = messages.filter(m => m.role !== 'system');
   const truncated = rest.slice(-config.maxReplayMessages);
@@ -39,7 +36,6 @@ export function serializeMessages(messages: ChatMessage[]): string {
 }
 
 export function extractLastUserMessage(messages: ChatMessage[]): string {
-  messages = messages.map(m => ({ ...m, content: stripSessionMarker(m.content) }));
   const system = messages.filter(m => m.role === 'system');
   const userMsgs = messages.filter(m => m.role === 'user');
   const lastUser = userMsgs[userMsgs.length - 1]?.content ?? '';

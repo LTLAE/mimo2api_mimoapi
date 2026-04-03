@@ -28,8 +28,7 @@ export function initDb() {
       account_id TEXT NOT NULL,
       client_session_id TEXT NOT NULL,
       conversation_id TEXT NOT NULL,
-      last_messages_hash TEXT,
-      last_msg_count INTEGER DEFAULT 0,
+      last_message_fingerprint TEXT DEFAULT '',
       cumulative_prompt_tokens INTEGER DEFAULT 0,
       is_expired INTEGER DEFAULT 0,
       created_at TEXT,
@@ -52,4 +51,44 @@ export function initDb() {
       created_at TEXT
     );
   `);
+
+  // 迁移：添加 last_message_fingerprint 列（如果不存在）
+  try {
+    db.exec(`ALTER TABLE sessions ADD COLUMN last_message_fingerprint TEXT DEFAULT ''`);
+    console.log('[DB] Added last_message_fingerprint column to sessions table');
+  } catch (err: any) {
+    if (!err.message.includes('duplicate column name')) {
+      console.error('[DB] Migration error:', err);
+    }
+  }
+
+  // 清理旧的列（如果存在）
+  const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+  const hasOldColumns = columns.some(c => c.name === 'last_messages_hash' || c.name === 'last_msg_count');
+  
+  if (hasOldColumns) {
+    console.log('[DB] Migrating sessions table to remove old columns...');
+    db.exec(`
+      CREATE TABLE sessions_new (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        client_session_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        last_message_fingerprint TEXT DEFAULT '',
+        cumulative_prompt_tokens INTEGER DEFAULT 0,
+        is_expired INTEGER DEFAULT 0,
+        created_at TEXT,
+        last_used_at TEXT,
+        UNIQUE(account_id, client_session_id)
+      );
+      
+      INSERT INTO sessions_new (id, account_id, client_session_id, conversation_id, cumulative_prompt_tokens, is_expired, created_at, last_used_at)
+      SELECT id, account_id, client_session_id, conversation_id, cumulative_prompt_tokens, is_expired, created_at, last_used_at
+      FROM sessions;
+      
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+    `);
+    console.log('[DB] Migration completed');
+  }
 }
