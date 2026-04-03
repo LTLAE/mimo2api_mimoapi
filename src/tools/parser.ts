@@ -127,7 +127,7 @@ function parseXmlParam(xml: string): Record<string, unknown> {
 
   const reserved = new Set([
     'parameter', 'arg', 'name', 'function', 'tool_call', 
-    'tool_result', 'arguments', 'parameters', 'input', 'invoke'
+    'tool_result', 'arguments', 'parameters', 'input', 'invoke', 'tool_name'
   ]);
 
   // 解析标准格式
@@ -162,12 +162,12 @@ function parseXmlParam(xml: string): Record<string, unknown> {
 
 // 提取工具名称
 function extractName(inner: string): string | null {
-  // 1. 显式标签: <name>...</name> 或 <function>...</function>
-  let m = inner.match(/<(?:name|function)>([\s\S]*?)<\/(?:name|function)>/i);
+  // 1. 显式标签: <name>...</name>, <function>...</function>, <tool_name>...</tool_name>
+  let m = inner.match(/<(?:name|function|tool_name)>([\s\S]*?)<\/(?:name|function|tool_name)>/i);
   if (m) return m[1].trim();
 
-  // 2. 属性格式: <name=...> 或 <function=...>
-  m = inner.match(/<(?:name|function)=["']?([^"'<>\s/]+)["']?/i);
+  // 2. 属性格式: <name=...>, <function=...>, <tool_name=...>
+  m = inner.match(/<(?:name|function|tool_name)=["']?([^"'<>\s/]+)["']?/i);
   if (m) return m[1].trim();
 
   // 3. JSON 格式中的 name 字段
@@ -182,7 +182,7 @@ function extractName(inner: string): string | null {
   m = inner.match(/<([a-zA-Z_][\w-]*)/);
   if (m) {
     const tag = m[1].toLowerCase();
-    const reserved = ['parameter', 'arg', 'name', 'function', 'tool_call', 'tool_result', 'arguments', 'parameters', 'input'];
+    const reserved = ['parameter', 'arg', 'name', 'function', 'tool_call', 'tool_result', 'arguments', 'parameters', 'input', 'tool_name'];
     if (!reserved.includes(tag)) {
       return m[1].trim();
     }
