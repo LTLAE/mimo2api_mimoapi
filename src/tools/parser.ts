@@ -52,44 +52,59 @@ function cleanInvisibleChars(text: string): string {
 function repairJson(json: string): string {
   let repaired = json;
 
-  // 0. 修复 Windows 文件路径中的反斜杠（在处理字符串之前）
-  // 将单个反斜杠替换为双反斜杠，但保留已经转义的
-  repaired = repaired.replace(/"([^"]*?)"/g, (match, content) => {
-    // 只处理看起来像文件路径的字符串（包含 :\ 或多个 \）
-    if (content.includes(':\\') || (content.match(/\\/g) || []).length > 1) {
-      // 先将所有 \\ 替换为占位符，避免重复转义
-      let fixed = content.replace(/\\\\/g, '\u0000ESCAPED_BACKSLASH\u0000');
-      // 将单个 \ 替换为 \\
-      fixed = fixed.replace(/\\/g, '\\\\');
-      // 恢复占位符
-      fixed = fixed.replace(/\u0000ESCAPED_BACKSLASH\u0000/g, '\\\\');
-      return `"${fixed}"`;
-    }
-    return match;
-  });
-
-  // 1. 处理字符串内的换行符（保护已有的字符串）
-  repaired = repaired.replace(
-    /"([^"\\]*(\\.[^"\\]*)*)"/g,
-    (match) => {
-      return match
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r')
-        .replace(/\t/g, '\\t');
-    }
-  );
-
-  // 2. 移除尾随逗号
+  // 1. 移除尾随逗号
   repaired = repaired.replace(/,(\s*[}\]])/g, '$1');
 
-  // 3. 移除开头逗号
+  // 2. 移除开头逗号
   repaired = repaired.replace(/([{\[])\s*,/g, '$1');
 
-  // 4. 移除注释（简单处理）
+  // 3. 移除注释（简单处理）
   repaired = repaired.replace(/\/\*[\s\S]*?\*\//g, '');
   repaired = repaired.replace(/\/\/.*/g, '');
 
   return repaired;
+}
+
+// 更智能的 JSON 解析，处理包含换行符的字符串
+function parseJsonSafely(text: string): any {
+  try {
+    // 先尝试直接解析
+    return JSON.parse(text);
+  } catch (firstError) {
+    try {
+      // 尝试修复后解析
+      return JSON.parse(repairJson(text));
+    } catch (secondError) {
+      // 如果还是失败，尝试更激进的修复：
+      // 找到所有字符串值，并确保它们被正确转义
+      let fixed = text;
+      
+      // 匹配 "key": "value" 模式，其中 value 可能包含未转义的换行符
+      // 使用负向后查找确保引号前没有反斜杠
+      fixed = fixed.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"/g, (match, content) => {
+        // 如果内容已经被正确转义，直接返回
+        if (!content.includes('\n') && !content.includes('\r') && !content.includes('\t')) {
+          return match;
+        }
+        
+        // 否则，重新转义
+        const escaped = content
+          .replace(/\n/g, '\\n')
+          .replace(/\r/g, '\\r')
+          .replace(/\t/g, '\\t');
+        
+        return `"${escaped}"`;
+      });
+      
+      try {
+        return JSON.parse(fixed);
+      } catch (thirdError) {
+        // 最后尝试：移除所有实际的换行符，只保留转义的
+        const noNewlines = text.replace(/([^\\])\n/g, '$1\\n').replace(/([^\\])\r/g, '$1\\r');
+        return JSON.parse(noNewlines);
+      }
+    }
+  }
 }
 
 // 智能值解析（递归解析 JSON 字符串）
@@ -107,38 +122,38 @@ function parseValue(val: string): unknown {
   
   // 尝试 JSON 解析
   try {
-    const parsed = JSON.parse(trimmed);
+    const parsed = parseJsonSafely(trimmed);
     // 如果解析结果是字符串，尝试再次解析（处理双重编码的情况）
     if (typeof parsed === 'string' && (parsed.startsWith('{') || parsed.startsWith('['))) {
       try {
-        return JSON.parse(parsed);
+        return parseJsonSafely(parsed);
       } catch {
         return parsed;
       }
     }
     return parsed;
   } catch {
-    // 尝试修复后再解析
-    try {
-      const repaired = JSON.parse(repairJson(trimmed));
-      // 同样处理双重编码
-      if (typeof repaired === 'string' && (repaired.startsWith('{') || repaired.startsWith('['))) {
-        try {
-          return JSON.parse(repaired);
-        } catch {
-          return repaired;
-        }
-      }
-      return repaired;
-    } catch {
-      // 返回原始字符串
-      return trimmed;
-    }
+    // 返回原始字符串
+    return trimmed;
   }
 }
 
 // 改进的 XML 参数解析
 function parseXmlParam(xml: string): Record<string, unknown> {
+  const trimmed = xml.trim();
+  
+  // 0. 如果内容是 JSON 格式，直接解析
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = parseJsonSafely(trimmed);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch (err) {
+      log('warn', 'Failed to parse JSON in parseXmlParam', { error: String(err), xml: trimmed.slice(0, 100) });
+    }
+  }
+  
   const result: Record<string, unknown> = {};
 
   // 1. 标准属性格式: <parameter name="key">value</parameter>
@@ -199,20 +214,14 @@ function extractName(inner: string): string | null {
   if (inner.includes('"name"') || inner.includes("'name'")) {
     try {
       // 先尝试直接解析
-      const parsed = JSON.parse(inner);
+      const parsed = parseJsonSafely(inner);
       if (parsed.name) return String(parsed.name);
     } catch {
-      // 如果失败，尝试修复后解析
-      try {
-        const parsed = JSON.parse(repairJson(inner));
-        if (parsed.name) return String(parsed.name);
-      } catch {
-        // 如果还是失败，尝试用正则直接提取 name 字段的值
-        const nameMatch = inner.match(/"name"\s*:\s*"([^"]+)"/);
-        if (nameMatch) return nameMatch[1];
-        const nameMatch2 = inner.match(/'name'\s*:\s*'([^']+)'/);
-        if (nameMatch2) return nameMatch2[1];
-      }
+      // 如果失败，尝试用正则直接提取 name 字段的值
+      const nameMatch = inner.match(/"name"\s*:\s*"([^"]+)"/);
+      if (nameMatch) return nameMatch[1];
+      const nameMatch2 = inner.match(/'name'\s*:\s*'([^']+)'/);
+      if (nameMatch2) return nameMatch2[1];
     }
   }
 
@@ -295,7 +304,7 @@ function parseMimoNativeToolCalls(text: string): ParsedToolCall[] {
     // 尝试 JSON 格式
     if (inner.startsWith('{')) {
       try {
-        const parsed = JSON.parse(repairJson(inner));
+        const parsed = parseJsonSafely(inner);
         if (parsed.name) {
           calls.push({
             id: parsed.id ?? callId,
@@ -305,7 +314,12 @@ function parseMimoNativeToolCalls(text: string): ParsedToolCall[] {
           continue;
         }
       } catch (err) {
-        log('warn', 'JSON parse failed, falling back to XML', { error: String(err), inner: inner.slice(0, 100) });
+        log('warn', 'JSON parse failed, falling back to XML', { 
+          error: String(err), 
+          innerLength: inner.length,
+          innerPreview: inner.slice(0, 200),
+          innerEnd: inner.slice(-100)
+        });
       }
     }
 
@@ -338,8 +352,13 @@ function parseMimoNativeToolCalls(text: string): ParsedToolCall[] {
         argsXml = argsMatch[1];
       }
       const args = parseXmlParam(argsXml);
-      console.log('[PARSE:DEBUG] Extracted args from XML:', { name, argsXml: argsXml.slice(0, 200), args });
-      calls.push({ id: callId, name, arguments: args });
+      
+      // 只有当参数有效时才添加
+      if (Object.keys(args).length > 0 || toolCallName) {
+        calls.push({ id: callId, name, arguments: args });
+      } else {
+        log('warn', 'No arguments extracted', { name, inner: inner.slice(0, 100) });
+      }
     } else {
       log('warn', 'Failed to extract tool name', { inner: inner.slice(0, 100) });
     }
@@ -397,7 +416,7 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
   // 检测格式并解析
   let calls: ParsedToolCall[] = [];
 
-  if (cleanText.includes('<tool_call>')) {
+  if (cleanText.includes('<tool_call')) {
     calls = parseMimoNativeToolCalls(cleanText);
     log('info', `Parsed ${calls.length} MiMo native tool calls`);
     console.log('[PARSE:DEBUG] Parsed calls:', JSON.stringify(calls, null, 2));
@@ -432,5 +451,5 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
 export function hasToolCallMarker(text: string): boolean {
   if (!text || typeof text !== 'string') return false;
   const cleanText = cleanInvisibleChars(text);
-  return cleanText.includes('<tool_call>') || cleanText.includes('<function_calls>');
+  return cleanText.includes('<tool_call') || cleanText.includes('<function_calls>');
 }
