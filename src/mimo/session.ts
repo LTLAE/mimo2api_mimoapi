@@ -2,6 +2,7 @@ import { db } from '../db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { config } from '../config.js';
 import { calculateMessageFingerprint } from './session-marker.js';
+import { isHistoryContaminated } from './serialize.js';
 
 export interface Session {
   id: string;
@@ -34,27 +35,33 @@ export async function getOrCreateSession(
   messages: any[]
 ): Promise<{ conversationId: string; session: Session }> {
   const currentFingerprint = calculateMessageFingerprint(messages);
-  
+
   console.log('[SESSION] getOrCreateSession:', {
     accountId: accountId.slice(0, 8) + '...',
     clientSessionId: clientSessionId.slice(0, 20) + '...',
     messageCount: messages.length,
     fingerprint: currentFingerprint.slice(0, 16) + '...'
   });
-  
+
   // 查找所有活跃的会话，检查消息连续性
   const activeSessions = db.prepare(
     'SELECT * FROM sessions WHERE account_id = ? AND is_expired = 0 ORDER BY last_used_at DESC LIMIT 10'
   ).all(accountId) as Session[];
-  
+
   console.log(`[SESSION] Found ${activeSessions.length} active sessions for this account`);
   
   for (const session of activeSessions) {
     console.log(`[SESSION] Checking session ${session.id.slice(0, 8)}..., fingerprint: ${session.last_message_fingerprint.slice(0, 16)}...`);
-    
+
     // 检查当前消息是否包含上次的消息（通过比较指纹）
     // 如果当前消息更长，且包含了之前的内容，说明是连续的
     if (isMessageContinuation(messages, session.last_message_fingerprint)) {
+      // 检测历史是否被污染（只在复用会话时检查）
+      if (isHistoryContaminated(messages)) {
+        console.log('[SESSION] ⚠️ History contamination detected in continuation, forcing new session...');
+        break; // 跳出循环，创建新会话
+      }
+
       // Token 超限检查
       if (session.cumulative_prompt_tokens > config.contextResetThreshold && config.contextResetThreshold > 0) {
         console.log('[SESSION] Token limit exceeded, creating new session...');
@@ -100,24 +107,29 @@ export async function getOrCreateSession(
 function isMessageContinuation(currentMessages: any[], lastFingerprint: string): boolean {
   // 如果是首次请求（没有历史指纹），不是连续
   if (!lastFingerprint) return false;
-  
-  // 如果只有1条消息，无法判断连续性（可能是新对话）
-  if (currentMessages.length < 2) return false;
-  
+
+  // 过滤掉 system 消息
+  const nonSystemMessages = currentMessages.filter(m => m.role !== 'system');
+
+  // 如果只有1条非 system 消息，无法判断连续性（可能是新对话）
+  if (nonSystemMessages.length < 2) return false;
+
   // 尝试不同的切片长度，看是否能匹配上次的指纹
-  // 从最近的开始往前查找（因为最可能匹配最近的）
-  for (let i = currentMessages.length - 1; i >= 1; i--) {
-    const slice = currentMessages.slice(0, i);
-    const sliceFingerprint = calculateMessageFingerprint(slice);
-    
-    console.log(`[SESSION] Checking slice [0:${i}], fingerprint: ${sliceFingerprint.slice(0, 16)}... vs ${lastFingerprint.slice(0, 16)}...`);
-    
+  // 从最长的开始往前查找（优先匹配完整历史）
+  for (let i = nonSystemMessages.length; i >= 1; i--) {
+    const slice = nonSystemMessages.slice(0, i);
+    // 需要加回 system 消息来计算指纹（因为 calculateMessageFingerprint 会过滤）
+    const sliceWithSystem = currentMessages.filter(m => m.role === 'system').concat(slice);
+    const sliceFingerprint = calculateMessageFingerprint(sliceWithSystem);
+
+    console.log(`[SESSION] Checking slice [0:${i}] (${i} non-system msgs), fingerprint: ${sliceFingerprint.slice(0, 16)}... vs ${lastFingerprint.slice(0, 16)}...`);
+
     if (sliceFingerprint === lastFingerprint) {
       console.log('[SESSION] ✓ Found continuation at message index:', i);
       return true;
     }
   }
-  
+
   return false;
 }
 

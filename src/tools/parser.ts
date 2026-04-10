@@ -62,6 +62,18 @@ function repairJson(json: string): string {
   repaired = repaired.replace(/\/\*[\s\S]*?\*\//g, '');
   repaired = repaired.replace(/\/\/.*/g, '');
 
+  // 4. 修复数字后多余的引号：123"}} -> 123}}
+  repaired = repaired.replace(/(\d+)"([}\],])/g, '$1$2');
+
+  // 5. 修复字符串值后缺少引号：": value, -> ": "value",
+  repaired = repaired.replace(/:\s*([^"{[\d\s][^,}\]]*?)([,}\]])/g, (match, value, end) => {
+    const trimmed = value.trim();
+    if (trimmed === 'true' || trimmed === 'false' || trimmed === 'null') {
+      return `: ${trimmed}${end}`;
+    }
+    return `: "${trimmed}"${end}`;
+  });
+
   return repaired;
 }
 
@@ -141,7 +153,7 @@ function parseValue(val: string): unknown {
 // 改进的 XML 参数解析
 function parseXmlParam(xml: string): Record<string, unknown> {
   const trimmed = xml.trim();
-  
+
   // 0. 如果内容是 JSON 格式，直接解析
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
@@ -150,23 +162,28 @@ function parseXmlParam(xml: string): Record<string, unknown> {
         return parsed as Record<string, unknown>;
       }
     } catch (err) {
-      log('warn', 'Failed to parse JSON in parseXmlParam', { error: String(err), xml: trimmed.slice(0, 100) });
+      log('warn', 'Failed to parse JSON in parseXmlParam', {
+        error: String(err),
+        xml: trimmed.slice(0, 200),
+        xmlRaw: JSON.stringify(trimmed.slice(0, 150))
+      });
     }
   }
-  
+
   const result: Record<string, unknown> = {};
+  const keyCounts: Record<string, number> = {}; // 跟踪每个 key 出现的次数
 
   // 1. 标准属性格式: <parameter name="key">value</parameter>
   const re1 = /<(?:parameter|arg)\s+name=["']([^"']+)["']>([\s\S]*?)<\/(?:parameter|arg)>/gi;
-  
+
   // 2. 简化属性格式: <parameter=key>value</parameter>
   const re2 = /<(?:parameter|arg)=([^>\s/]+)>([\s\S]*?)<\/(?:parameter|arg)>/gi;
-  
+
   // 3. 通用标签格式: <key>value</key>（使用 [\s\S] 替代 .|\n|\r）
   const re3 = /<([a-zA-Z_][\w-]*?)>([\s\S]*?)<\/\1>/g;
 
   const reserved = new Set([
-    'parameter', 'arg', 'name', 'function', 'tool_call', 
+    'parameter', 'arg', 'name', 'function', 'tool_call',
     'tool_result', 'arguments', 'parameters', 'input', 'invoke', 'tool_name'
   ]);
 
@@ -175,15 +192,32 @@ function parseXmlParam(xml: string): Record<string, unknown> {
   while ((m = re1.exec(xml)) !== null) {
     const key = m[1].trim();
     const val = m[2].trim();
-    result[key] = parseValue(val);
+    const parsedVal = parseValue(val);
+
+    if (result[key] !== undefined) {
+      // 重复的 key，转换为数组
+      if (!Array.isArray(result[key])) {
+        result[key] = [result[key]];
+      }
+      (result[key] as unknown[]).push(parsedVal);
+    } else {
+      result[key] = parsedVal;
+    }
   }
 
   // 解析简化格式
   while ((m = re2.exec(xml)) !== null) {
     const key = m[1].trim();
     const val = m[2].trim();
-    if (!result[key]) {
-      result[key] = parseValue(val);
+    const parsedVal = parseValue(val);
+
+    if (result[key] !== undefined) {
+      if (!Array.isArray(result[key])) {
+        result[key] = [result[key]];
+      }
+      (result[key] as unknown[]).push(parsedVal);
+    } else {
+      result[key] = parsedVal;
     }
   }
 
@@ -191,10 +225,19 @@ function parseXmlParam(xml: string): Record<string, unknown> {
   while ((m = re3.exec(xml)) !== null) {
     const key = m[1].trim();
     if (reserved.has(key.toLowerCase())) continue;
-    if (result[key] !== undefined) continue;
-    
+
     const val = m[2].trim();
-    result[key] = parseValue(val);
+    const parsedVal = parseValue(val);
+
+    if (result[key] !== undefined) {
+      // 重复的 key，转换为数组
+      if (!Array.isArray(result[key])) {
+        result[key] = [result[key]];
+      }
+      (result[key] as unknown[]).push(parsedVal);
+    } else {
+      result[key] = parsedVal;
+    }
   }
 
   return result;
@@ -280,10 +323,12 @@ function parseMimoNativeToolCalls(text: string): ParsedToolCall[] {
   const calls: ParsedToolCall[] = [];
   const cleanText = cleanInvisibleChars(text);
 
-  // 支持两种格式：
+  // 支持多种格式：
   // 1. <tool_call>...</tool_call>
   // 2. <tool_call name="ToolName">...</tool_call>
-  const blockRe = /<tool_call(?:\s+name=["']([^"']+)["'])?>([\s\S]*?)<\/tool_call>/gi;
+  // 3. <toolcall>...</toolcall> (小写，无下划线)
+  // 4. <toolcall id="toolname">...</toolcall>
+  const blockRe = /<tool_?call(?:\s+(?:name|id)=["']([^"']+)["'])?>([\s\S]*?)<\/tool_?call>/gi;
   let block: RegExpExecArray | null;
   let count = 0;
 
@@ -293,9 +338,16 @@ function parseMimoNativeToolCalls(text: string): ParsedToolCall[] {
       break;
     }
 
-    const toolCallName = block[1]; // 从 <tool_call name="..."> 提取的名称
+    const toolCallName = block[1]; // 从 <tool_call name="..."> 或 <toolcall id="..."> 提取的名称
     let inner = block[2].trim();
-    
+
+    console.log('[PARSE:DEBUG] Found tool_call block:', {
+      toolCallName,
+      innerLength: inner.length,
+      innerPreview: inner.slice(0, 200),
+      innerRaw: JSON.stringify(inner.slice(0, 150))  // 添加原始字符串表示
+    });
+
     // 移除可能的 tool_result 包装
     inner = inner.replace(/^<tool_result>\s*/i, '').replace(/\s*<\/tool_result>$/i, '');
 
@@ -314,12 +366,43 @@ function parseMimoNativeToolCalls(text: string): ParsedToolCall[] {
           continue;
         }
       } catch (err) {
-        log('warn', 'JSON parse failed, falling back to XML', { 
-          error: String(err), 
+        log('warn', 'JSON parse failed, falling back to XML', {
+          error: String(err),
           innerLength: inner.length,
           innerPreview: inner.slice(0, 200),
           innerEnd: inner.slice(-100)
         });
+      }
+    }
+
+    // 处理特殊格式：第一行是工具名，后面是 JSON
+    // 例如：todowrite\n{"todos": [...]}
+    const lines = inner.split('\n');
+    if (lines.length >= 2 && lines[1].trim().startsWith('{')) {
+      const possibleName = lines[0].trim();
+      const jsonPart = lines.slice(1).join('\n').trim();
+      console.log('[PARSE:DEBUG] Trying special format:', {
+        possibleName,
+        toolCallName,
+        jsonPartPreview: jsonPart.slice(0, 100)
+      });
+      try {
+        const parsed = parseJsonSafely(jsonPart);
+        if (typeof parsed === 'object' && parsed !== null) {
+          const finalName = toolCallName || possibleName;
+          console.log('[PARSE:DEBUG] Successfully parsed special format:', {
+            name: finalName,
+            arguments: parsed
+          });
+          calls.push({
+            id: callId,
+            name: finalName,
+            arguments: parsed as Record<string, unknown>
+          });
+          continue;
+        }
+      } catch (err) {
+        log('warn', 'Failed to parse special format', { error: String(err), possibleName, jsonPart: jsonPart.slice(0, 100) });
       }
     }
 
@@ -395,6 +478,185 @@ function parseAnthropicToolCalls(text: string): ParsedToolCall[] {
   return calls;
 }
 
+// 解析 JSON 格式的工具调用（如 {"action": "ToolName", "args": {...}}）
+function parseJsonToolCalls(text: string): ParsedToolCall[] {
+  const calls: ParsedToolCall[] = [];
+  let cleanText = cleanInvisibleChars(text);
+
+  // 去除 markdown 代码块标记
+  cleanText = cleanText.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+
+  // 尝试提取所有 JSON 对象（使用正则匹配 {...} 块）
+  const jsonBlockRe = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
+  const matches = cleanText.match(jsonBlockRe);
+
+  if (matches) {
+    for (const jsonStr of matches) {
+      try {
+        const parsed = parseJsonSafely(jsonStr);
+
+        // 检查是否是工具调用格式
+        if (parsed.action && typeof parsed.action === 'string') {
+          // 提取参数：如果有 args/arguments 字段就用它，否则用除了 action 之外的所有字段
+          let args: Record<string, unknown>;
+          if (parsed.args !== undefined) {
+            args = typeof parsed.args === 'object' && parsed.args !== null ? parsed.args as Record<string, unknown> : { args: parsed.args };
+          } else if (parsed.arguments !== undefined) {
+            args = typeof parsed.arguments === 'object' && parsed.arguments !== null ? parsed.arguments as Record<string, unknown> : { arguments: parsed.arguments };
+          } else {
+            // 使用除了 action 之外的所有字段
+            const { action, ...rest } = parsed;
+            args = rest as Record<string, unknown>;
+          }
+
+          console.log('[PARSE:DEBUG] Found JSON tool call:', {
+            action: parsed.action,
+            args
+          });
+
+          calls.push({
+            id: generateCallId(),
+            name: parsed.action,
+            arguments: args
+          });
+        }
+      } catch (err) {
+        // 跳过无效的 JSON
+        continue;
+      }
+    }
+  }
+
+  // 如果没有找到，尝试解析整个文本为单个 JSON 或数组
+  if (calls.length === 0) {
+    try {
+      const parsed = parseJsonSafely(cleanText.trim());
+
+      // 单个工具调用
+      if (parsed.action && typeof parsed.action === 'string') {
+        // 提取参数：如果有 args/arguments 字段就用它，否则用除了 action 之外的所有字段
+        let args: Record<string, unknown>;
+        if (parsed.args !== undefined) {
+          args = typeof parsed.args === 'object' && parsed.args !== null ? parsed.args as Record<string, unknown> : { args: parsed.args };
+        } else if (parsed.arguments !== undefined) {
+          args = typeof parsed.arguments === 'object' && parsed.arguments !== null ? parsed.arguments as Record<string, unknown> : { arguments: parsed.arguments };
+        } else {
+          const { action, ...rest } = parsed;
+          args = rest as Record<string, unknown>;
+        }
+
+        console.log('[PARSE:DEBUG] Found JSON tool call:', {
+          action: parsed.action,
+          args
+        });
+
+        calls.push({
+          id: generateCallId(),
+          name: parsed.action,
+          arguments: args
+        });
+      }
+      // 数组格式
+      else if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item.action && typeof item.action === 'string') {
+            let args: Record<string, unknown>;
+            if (item.args !== undefined) {
+              args = typeof item.args === 'object' && item.args !== null ? item.args as Record<string, unknown> : { args: item.args };
+            } else if (item.arguments !== undefined) {
+              args = typeof item.arguments === 'object' && item.arguments !== null ? item.arguments as Record<string, unknown> : { arguments: item.arguments };
+            } else {
+              const { action, ...rest } = item;
+              args = rest as Record<string, unknown>;
+            }
+
+            calls.push({
+              id: generateCallId(),
+              name: item.action,
+              arguments: args
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log('warn', 'Failed to parse JSON tool call', { error: String(err), text: cleanText.slice(0, 200) });
+    }
+  }
+
+  return calls;
+}
+
+// 解析直接工具名标签格式（如 <todo_write>...</todo_write>）
+function parseDirectToolNameFormat(text: string): ParsedToolCall[] {
+  const calls: ParsedToolCall[] = [];
+  const cleanText = cleanInvisibleChars(text);
+
+  // 匹配 <tool_name>content</tool_name> 格式
+  // 工具名通常是小写字母、下划线、数字的组合
+  const directToolRe = /<([a-z_][a-z0-9_]*)\s*>([\s\S]*?)<\/\1>/gi;
+  let match: RegExpExecArray | null;
+  let count = 0;
+
+  const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u', 'todo', 'todo_list'];
+
+  while ((match = directToolRe.exec(cleanText)) !== null) {
+    if (++count > CONFIG.MAX_TOOL_CALLS) {
+      log('warn', `Exceeded max tool calls limit: ${CONFIG.MAX_TOOL_CALLS}`);
+      break;
+    }
+
+    const toolName = match[1];
+    const inner = match[2].trim();
+
+    // 跳过常见的 HTML/Markdown 标签和非工具标签
+    if (excludedTags.includes(toolName.toLowerCase())) {
+      continue;
+    }
+
+    console.log('[PARSE:DEBUG] Found direct tool name format:', {
+      toolName,
+      innerLength: inner.length,
+      innerPreview: inner.slice(0, 200)
+    });
+
+    const callId = generateCallId();
+
+    // 尝试解析内容为 JSON
+    if (inner.startsWith('{')) {
+      try {
+        const parsed = parseJsonSafely(inner);
+        calls.push({
+          id: callId,
+          name: toolName,
+          arguments: parsed as Record<string, unknown>
+        });
+        continue;
+      } catch (err) {
+        log('warn', 'Failed to parse JSON in direct format', { error: String(err), toolName });
+      }
+    }
+
+    // 尝试解析为 XML 参数
+    const args = parseXmlParam(inner);
+    if (Object.keys(args).length > 0) {
+      calls.push({
+        id: callId,
+        name: toolName,
+        arguments: args
+      });
+    } else {
+      // 如果没有参数，将整个内容作为单个参数
+      calls.push({
+        id: callId,
+        name: toolName,
+        arguments: { content: inner }
+      });
+    }
+  }
+
+  return calls;
+}
+
 // 主解析函数
 export function parseToolCalls(text: string): ParsedToolCall[] {
   // 输入验证
@@ -416,7 +678,7 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
   // 检测格式并解析
   let calls: ParsedToolCall[] = [];
 
-  if (cleanText.includes('<tool_call')) {
+  if (cleanText.includes('<tool_call') || cleanText.includes('<toolcall')) {
     calls = parseMimoNativeToolCalls(cleanText);
     log('info', `Parsed ${calls.length} MiMo native tool calls`);
     console.log('[PARSE:DEBUG] Parsed calls:', JSON.stringify(calls, null, 2));
@@ -424,6 +686,21 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
     calls = parseAnthropicToolCalls(cleanText);
     log('info', `Parsed ${calls.length} Anthropic tool calls`);
     console.log('[PARSE:DEBUG] Parsed calls:', JSON.stringify(calls, null, 2));
+  } else if (cleanText.includes('{"action"') || cleanText.includes('{ "action"') ||
+             (cleanText.includes('{') && cleanText.includes('"action"'))) {
+    // JSON 格式 - 使用更宽松的检测，支持 { 和 "action" 之间有换行
+    calls = parseJsonToolCalls(cleanText);
+    if (calls.length > 0) {
+      log('info', `Parsed ${calls.length} JSON format tool calls`);
+      console.log('[PARSE:DEBUG] Parsed calls:', JSON.stringify(calls, null, 2));
+    }
+  } else {
+    // 尝试直接工具名格式
+    calls = parseDirectToolNameFormat(cleanText);
+    if (calls.length > 0) {
+      log('info', `Parsed ${calls.length} direct tool name format calls`);
+      console.log('[PARSE:DEBUG] Parsed calls:', JSON.stringify(calls, null, 2));
+    }
   }
 
   // 验证结果
@@ -451,5 +728,41 @@ export function parseToolCalls(text: string): ParsedToolCall[] {
 export function hasToolCallMarker(text: string): boolean {
   if (!text || typeof text !== 'string') return false;
   const cleanText = cleanInvisibleChars(text);
-  return cleanText.includes('<tool_call') || cleanText.includes('<function_calls>');
+
+  // 检查标准格式
+  if (cleanText.includes('<tool_call') || cleanText.includes('<toolcall') || cleanText.includes('<function_calls>')) {
+    return true;
+  }
+
+  // 检查 JSON 格式的工具调用（如 {"action": "ToolName", "args": {...}}）
+  // 使用更宽松的检测：只要包含 {"action": 或 { 和 "action" 就认为可能是工具调用
+  if (cleanText.includes('{"action"') || cleanText.includes('{ "action"')) {
+    return true;
+  }
+
+  // 检查 { 和 "action" 之间只有空白字符的情况（支持换行）
+  if (cleanText.includes('{') && cleanText.includes('"action"')) {
+    const openBrace = cleanText.indexOf('{');
+    const actionPos = cleanText.indexOf('"action"');
+    if (actionPos > openBrace) {
+      const between = cleanText.slice(openBrace + 1, actionPos);
+      if (/^\s*$/.test(between)) {
+        return true;
+      }
+    }
+  }
+
+  // 检查直接工具名标签格式（如 <todo_write>, <run_command> 等）
+  const directToolPattern = /<([a-z_][a-z0-9_]*)\s*>/i;
+  const match = cleanText.match(directToolPattern);
+  if (match) {
+    const tagName = match[1].toLowerCase();
+    // 排除常见的 HTML/Markdown 标签
+    const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u'];
+    if (!excludedTags.includes(tagName)) {
+      return true;
+    }
+  }
+
+  return false;
 }

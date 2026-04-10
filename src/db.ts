@@ -36,10 +36,21 @@ export function initDb() {
       UNIQUE(account_id, client_session_id)
     );
 
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      key TEXT UNIQUE NOT NULL,
+      name TEXT,
+      is_active INTEGER DEFAULT 1,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      request_count INTEGER DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS request_logs (
       id TEXT PRIMARY KEY,
       account_id TEXT,
       session_id TEXT,
+      api_key_id TEXT,
       endpoint TEXT,
       model TEXT,
       prompt_tokens INTEGER,
@@ -56,6 +67,16 @@ export function initDb() {
   try {
     db.exec(`ALTER TABLE sessions ADD COLUMN last_message_fingerprint TEXT DEFAULT ''`);
     console.log('[DB] Added last_message_fingerprint column to sessions table');
+  } catch (err: any) {
+    if (!err.message.includes('duplicate column name')) {
+      console.error('[DB] Migration error:', err);
+    }
+  }
+
+  // 迁移：添加 api_key_id 列到 request_logs（如果不存在）
+  try {
+    db.exec(`ALTER TABLE request_logs ADD COLUMN api_key_id TEXT`);
+    console.log('[DB] Added api_key_id column to request_logs table');
   } catch (err: any) {
     if (!err.message.includes('duplicate column name')) {
       console.error('[DB] Migration error:', err);

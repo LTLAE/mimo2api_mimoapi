@@ -7,7 +7,8 @@
 - 兼容 OpenAI `v1/chat/completions` 接口（支持流式 & 非流式）
 - 兼容 Anthropic `v1/messages` 接口（支持流式 & 非流式）
 - **图片理解**：支持 OpenAI `image_url` 和 Anthropic `image` 多模态内容块（自动上传至小米 OSS）
-- 多账号负载均衡，自动选择最空闲账号
+- **多账号负载均衡**：自动选择最空闲账号，提升并发能力
+- **动态 API 密钥管理**：通过 Web 界面创建/管理密钥，支持多客户端接入
 - 会话保持（Context Replay），减少 token 消耗
 - Tool Calling 支持（函数调用）
 - `<think>` 推理内容三种处理模式：保留 / 剥离 / 分离
@@ -89,11 +90,13 @@ curl -X POST http://localhost:8080/admin/accounts \
 
 服务兼容 OpenAI 和 Anthropic 的接口，直接将 `base_url` 指向本服务即可。
 
+**重要**：使用前需先在管理界面创建 API 密钥。
+
 ### OpenAI 兼容
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer <account-api-key>" \
+  -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -109,7 +112,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ```bash
 curl http://localhost:8080/v1/messages \
-  -H "x-api-key: <account-api-key>" \
+  -H "x-api-key: <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "mimo-v2-pro",
@@ -117,6 +120,12 @@ curl http://localhost:8080/v1/messages \
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
+
+### 负载均衡说明
+
+- 提供有效的 API 密钥后，系统会自动选择最空闲的 MiMo 账号处理请求
+- 无需关心使用哪个账号，系统自动负载均衡
+- 可在管理界面实时查看各账号的并发状态
 
 
 ## 数据存储

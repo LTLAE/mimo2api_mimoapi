@@ -1,14 +1,32 @@
 import { ParsedToolCall } from './parser.js';
 
 export function toOpenAIToolCalls(calls: ParsedToolCall[]) {
-  return calls.map(c => ({
-    id: c.id,
-    type: 'function' as const,
-    function: {
-      name: c.name,
-      arguments: JSON.stringify(c.arguments),
-    },
-  }));
+  return calls.map(c => {
+    // 确保 arguments 能正确序列化
+    let argsString: string;
+    try {
+      if (typeof c.arguments === 'string') {
+        argsString = c.arguments;
+      } else if (c.arguments === null || c.arguments === undefined) {
+        argsString = '{}';
+      } else {
+        argsString = JSON.stringify(c.arguments);
+      }
+    } catch (err) {
+      console.error('[FORMAT] Failed to stringify tool arguments:', err);
+      console.error('[FORMAT] Arguments value:', c.arguments);
+      argsString = '{}';
+    }
+
+    return {
+      id: c.id,
+      type: 'function' as const,
+      function: {
+        name: c.name,
+        arguments: argsString,
+      },
+    };
+  });
 }
 
 export function toAnthropicToolUse(calls: ParsedToolCall[]) {

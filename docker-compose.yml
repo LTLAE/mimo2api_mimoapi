@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  mimo-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./mimo-proxy.db:/app/mimo-proxy.db
+    env_file:
+      - .env
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production

@@ -8,23 +8,49 @@ import { Context } from 'hono';
 
 /**
  * 计算消息列表的指纹（用于快速匹配）
+ *
+ * 策略：只对 user 和 assistant 消息计算指纹，排除 system 消息
+ * 原因：system 消息可能包含动态内容（如 tools 列表），会导致指纹变化
  */
 export function calculateMessageFingerprint(messages: any[]): string {
+  // 过滤掉 system 消息，只保留 user 和 assistant
+  const nonSystemMessages = messages.filter(m => m.role !== 'system');
+
+  // 如果没有非 system 消息，返回空指纹
+  if (nonSystemMessages.length === 0) {
+    return '';
+  }
+
   // 只取最后几条消息计算指纹（避免过长）
-  const recentMessages = messages.slice(-5);
-  const content = JSON.stringify(recentMessages.map(m => ({
-    role: m.role,
-    content: typeof m.content === 'string' ? m.content.slice(0, 200) : String(m.content).slice(0, 200)
-  })));
-  
+  const recentMessages = nonSystemMessages.slice(-5);
+  const content = JSON.stringify(recentMessages.map(m => {
+    let contentStr: string;
+    if (typeof m.content === 'string') {
+      contentStr = m.content;
+    } else if (Array.isArray(m.content)) {
+      // 处理数组类型的 content（如 OpenAI 的多模态消息）
+      contentStr = JSON.stringify(m.content);
+    } else if (m.content && typeof m.content === 'object') {
+      // 处理对象类型的 content
+      contentStr = JSON.stringify(m.content);
+    } else {
+      contentStr = String(m.content || '');
+    }
+    return {
+      role: m.role,
+      content: contentStr.slice(0, 200)
+    };
+  }));
+
   const fingerprint = createHash('sha256').update(content).digest('hex');
-  
+
   console.log('[FINGERPRINT] Calculated:', {
-    messageCount: messages.length,
+    totalMessages: messages.length,
+    nonSystemMessages: nonSystemMessages.length,
     contentPreview: content.slice(0, 100) + '...',
     fingerprint: fingerprint.slice(0, 16) + '...'
   });
-  
+
   return fingerprint;
 }
 

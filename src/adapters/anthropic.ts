@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { getAccountByApiKey, getLeastBusyAccount, incrementActive, decrementActive, markAccountInactive } from '../accounts.js';
+import { getLeastBusyAccount, incrementActive, decrementActive, markAccountInactive } from '../accounts.js';
+import { validateApiKey, recordApiKeyUsage } from '../api-keys.js';
 import { callMimo, MimoUsage } from '../mimo/client.js';
 import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
 import { config } from '../config.js';
@@ -26,16 +27,17 @@ function resolveModel(model: string): string {
 
 function logRequest(data: {
   account_id: string;
+  api_key_id: string | null;
   usage: MimoUsage | null;
   status: 'success' | 'error';
   error?: string;
   duration_ms: number;
 }) {
   db.prepare(
-    `INSERT INTO request_logs (id, account_id, session_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
-     VALUES (?, ?, NULL, 'anthropic', 'mimo-v2-pro', ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO request_logs (id, account_id, session_id, api_key_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
+     VALUES (?, ?, NULL, ?, 'anthropic', 'mimo-v2-pro', ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    uuidv4(), data.account_id,
+    uuidv4(), data.account_id, data.api_key_id,
     data.usage?.promptTokens ?? null, data.usage?.completionTokens ?? null,
     data.usage?.reasoningTokens ?? null, data.duration_ms,
     data.status, data.error ?? null, new Date().toLocaleString('sv-SE')
@@ -115,15 +117,35 @@ export function registerAnthropic(app: Hono) {
     const authHeader = c.req.header('x-api-key') ?? c.req.header('Authorization')?.replace(/^Bearer\s+/i, '') ?? '';
     console.log('[REQ] Headers:', { hasAuth: !!authHeader, apiKeyPrefix: authHeader ? authHeader.slice(0, 8) + '...' : 'none', contentType: c.req.header('Content-Type') });
 
-    const account = authHeader ? getAccountByApiKey(authHeader) : getLeastBusyAccount();
-    if (!account) {
-      console.log('[REQ] ❌ No account available');
-      return c.json({ type: 'error', error: { type: 'authentication_error', message: 'Unauthorized' } }, 401);
+    // 1. 认证检查
+    if (!authHeader) {
+      console.log('[REQ] ❌ Missing API key');
+      return c.json({ type: 'error', error: { type: 'authentication_error', message: 'Missing API key' } }, 401);
     }
-    console.log('[REQ] ✓ Account found:', { id: account.id.slice(0, 8) + '...', alias: account.alias || 'no-alias', activeRequests: account.active_requests });
 
-    if (account.active_requests >= config.maxConcurrentPerAccount) {
+    const apiKeyRecord = validateApiKey(authHeader);
+    if (!apiKeyRecord) {
+      console.log('[REQ] ❌ Invalid API key');
+      return c.json({ type: 'error', error: { type: 'authentication_error', message: 'Invalid API key' } }, 401);
+    }
+    console.log('[REQ] ✓ API key validated:', { id: apiKeyRecord.id.slice(0, 8) + '...', name: apiKeyRecord.name || 'unnamed' });
+
+    // 2. 负载均衡选择账号
+    const account = getLeastBusyAccount();
+    if (!account) {
+      console.log('[REQ] ❌ No active account available');
+      return c.json({ type: 'error', error: { type: 'service_error', message: 'No active account available' } }, 503);
+    }
+    console.log('[REQ] ✓ Account selected:', { id: account.id.slice(0, 8) + '...', alias: account.alias || 'no-alias', activeRequests: account.active_requests });
+
+    // 3. 记录 API 密钥使用
+    recordApiKeyUsage(apiKeyRecord.id);
+
+    // 4. 增加并发计数并检查限制
+    incrementActive(account.id);
+    if (account.active_requests + 1 > config.maxConcurrentPerAccount) {
       console.log('[REQ] ❌ Rate limit exceeded');
+      decrementActive(account.id);
       return c.json({ type: 'error', error: { type: 'rate_limit_error', message: 'Too many requests' } }, 429);
     }
 
@@ -150,7 +172,6 @@ export function registerAnthropic(app: Hono) {
     const startTime = Date.now();
     const msgId = `msg_${uuidv4().replace(/-/g, '')}`;
     console.log('[REQ] 🚀 Starting request processing...');
-    incrementActive(account.id);
     let lastUsage: MimoUsage | null = null;
 
     try {
@@ -291,8 +312,10 @@ export function registerAnthropic(app: Hono) {
                     toolCallBuf += text;
                   } else {
                     pendingText += text;
-                    const fc1 = pendingText.indexOf('<function_calls>'), fc2 = pendingText.indexOf('<tool_call>');
-                    const fcIdx = fc1 === -1 ? fc2 : fc2 === -1 ? fc1 : Math.min(fc1, fc2);
+                    const fc1 = pendingText.indexOf('<function_calls>');
+                    const fc2 = pendingText.indexOf('<tool_call>');
+                    const fc3 = pendingText.indexOf('<toolcall');
+                    const fcIdx = [fc1, fc2, fc3].filter(i => i !== -1).sort((a, b) => a - b)[0] ?? -1;
                     if (fcIdx !== -1) {
                       const before = pendingText.slice(0, fcIdx);
                       if (before) await sendEvent('content_block_delta', { type: 'content_block_delta', index: idx, delta: { type: 'text_delta', text: before } });
@@ -345,7 +368,17 @@ export function registerAnthropic(app: Hono) {
                       await sendEvent('content_block_stop', { type: 'content_block_stop', index: blockIdx });
                     }
                   } else {
-                    await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: toolCallBuf } });
+                    // 解析失败，尝试提取工具调用之前的文本
+                    const toolCallStart = Math.min(
+                      toolCallBuf.indexOf('<toolcall') !== -1 ? toolCallBuf.indexOf('<toolcall') : Infinity,
+                      toolCallBuf.indexOf('<tool_call') !== -1 ? toolCallBuf.indexOf('<tool_call') : Infinity,
+                      toolCallBuf.indexOf('<function_calls>') !== -1 ? toolCallBuf.indexOf('<function_calls>') : Infinity
+                    );
+                    if (toolCallStart !== Infinity && toolCallStart > 0) {
+                      await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: toolCallBuf.slice(0, toolCallStart) } });
+                    } else {
+                      await sendEvent('content_block_delta', { type: 'content_block_delta', index: lastIdx, delta: { type: 'text_delta', text: toolCallBuf } });
+                    }
                   }
                 }
                 clearInterval(pingTimer!);
@@ -359,13 +392,13 @@ export function registerAnthropic(app: Hono) {
             if (!isAborted) {
               try { await sendEvent('error', { type: 'error', error: { type: 'api_error', message: String(err) } }); } catch {}
             }
-            logRequest({ account_id: account.id, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
           } finally {
             if (pingTimer) clearInterval(pingTimer);
           }
 
           if (!isAborted) {
-            logRequest({ account_id: account.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
             // 更新会话 token 统计
             if (lastUsage) {
               updateSessionTokens(session.id, lastUsage.promptTokens);
@@ -401,7 +434,7 @@ export function registerAnthropic(app: Hono) {
           for (const block of toAnthropicToolUse(calls)) content.push(block);
         }
       }
-      logRequest({ account_id: account.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
       // 更新会话 token 统计
       if (lastUsage) {
         updateSessionTokens(session.id, lastUsage.promptTokens);
@@ -414,7 +447,7 @@ export function registerAnthropic(app: Hono) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('401') || msg.includes('403')) markAccountInactive(account.id);
-      logRequest({ account_id: account.id, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
       return c.json({ type: 'error', error: { type: 'api_error', message: msg } }, 502);
     } finally {
       decrementActive(account.id);

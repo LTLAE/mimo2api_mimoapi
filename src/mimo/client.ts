@@ -37,6 +37,14 @@ export async function* callMimo(
     multiMedias: multiMedias || [],
   };
 
+  console.log('[MIMO] Request:', {
+    conversationId: conversationId.slice(0, 16) + '...',
+    model,
+    enableThinking,
+    queryLength: query.length,
+    mediaCount: multiMedias.length
+  });
+
   const url = `${API_URL}?xiaomichatbot_ph=${encodeURIComponent(account.ph_token)}`;
   const resp = await fetch(url, {
     method: 'POST',
@@ -52,7 +60,20 @@ export async function* callMimo(
   });
 
   if (!resp.ok) {
-    throw new Error(`MiMo error: ${resp.status}`);
+    // 尝试读取错误响应内容
+    let errorBody = '';
+    try {
+      errorBody = await resp.text();
+      console.error('[MIMO] ❌ Error response:', {
+        status: resp.status,
+        statusText: resp.statusText,
+        headers: Object.fromEntries(resp.headers.entries()),
+        body: errorBody
+      });
+    } catch (e) {
+      console.error('[MIMO] ❌ Failed to read error body:', e);
+    }
+    throw new Error(`MiMo error: ${resp.status} - ${errorBody.slice(0, 500)}`);
   }
   if (!resp.body) throw new Error('No response body');
 

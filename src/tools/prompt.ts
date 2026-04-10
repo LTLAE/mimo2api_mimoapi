@@ -31,25 +31,21 @@ export function buildToolSystemPrompt(tools: ToolDefinition[]): string {
     const paramLine = props
       ? Object.entries(props).map(([k, v]) => `${k}${required.includes(k) ? '*' : ''}:${v.type ?? 'any'}`).join(', ')
       : '';
-    const desc = (fn.description ?? '').split('\n')[0].slice(0, 120);
-    return `- ${fn.name}(${paramLine}): ${desc}`;
-  }).join('\n');
+    const desc = (fn.description ?? '').split('\n')[0].slice(0, 80);
+    return `${fn.name}(${paramLine})`;
+  }).join(', ');
 
-  return `[工具调用规则]
-你可以调用以下工具。需要调用工具时，每个工具调用单独输出，格式如下：
-
+  return `[工具调用格式 - 必须严格遵守]
 <tool_call>
-{"name": "工具名", "arguments": {"参数名": "参数值"}}
+{"name": "工具名", "arguments": {"参数": "值"}}
 </tool_call>
 
-可同时输出多个 tool_call。不需要调用工具时，直接回答，不输出 tool_call。
+要求：
+• 必须用 <tool_call> 标签包裹 JSON
+• JSON 必须有 "name" 和 "arguments" 字段
+• 禁止输出 bash 命令或 markdown 代码块
+• 禁止输出 <toolcall_status>、<toolcall_result> 等系统标签
+• 禁止使用中文标签（如 <函数调用>、<函数名> 等）
 
-示例：
-用户问：北京天气怎么样？
-<tool_call>
-{"name": "get_weather", "arguments": {"location": "北京", "unit": "celsius"}}
-</tool_call>
-
-[可用工具]
-${toolDescs}`;
+可用工具：${toolDescs}`;
 }

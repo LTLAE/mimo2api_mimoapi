@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { getAccountByApiKey, getLeastBusyAccount, incrementActive, decrementActive, markAccountInactive } from '../accounts.js';
+import { getLeastBusyAccount, incrementActive, decrementActive, markAccountInactive } from '../accounts.js';
+import { validateApiKey, recordApiKeyUsage } from '../api-keys.js';
 import { callMimo, MimoUsage } from '../mimo/client.js';
 import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
 import { config } from '../config.js';
@@ -37,20 +38,67 @@ function processThinkContent(text: string, mode: string): string {
   return text;
 }
 
+// 转义字符串用于 JSON
+function escapeForJson(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')  // 先转义反斜杠
+    .replace(/"/g, '\\"')     // 再转义双引号
+    .replace(/\n/g, '\\n')    // 转义换行符
+    .replace(/\r/g, '\\r')    // 转义回车符
+    .replace(/\t/g, '\\t');   // 转义制表符
+}
+
+// 检测并转换 bash 命令为工具调用
+function detectAndConvertBashCommands(text: string): { hasBashCommand: boolean; convertedText?: string } {
+  // 检测 markdown bash 代码块
+  const bashBlockMatch = text.match(/```(?:bash|sh|shell)\s*\n([\s\S]*?)\n```/);
+  if (bashBlockMatch) {
+    const command = bashBlockMatch[1].trim();
+    const converted = `<tool_call>\n{"name": "RunCommand", "arguments": {"command": "${escapeForJson(command)}"}}\n</tool_call>`;
+    return { hasBashCommand: true, convertedText: text.replace(bashBlockMatch[0], converted) };
+  }
+
+  // 检测常见的 shell 命令模式（单独一行，以常见命令开头）
+  const lines = text.split('\n');
+  let hasCommand = false;
+  const convertedLines = lines.map(line => {
+    const trimmed = line.trim();
+    // 匹配常见命令：cat, ls, cd, pwd, grep, find, etc.
+    const commandMatch = trimmed.match(/^(cat|ls|cd|pwd|grep|find|mkdir|rm|cp|mv|touch|echo|head|tail|wc|sort|uniq|chmod|chown|ps|kill|df|du|tar|zip|unzip|curl|wget|git|npm|yarn|cargo|rustc|python|node|java|gcc|make)\s+/);
+    if (commandMatch && !line.includes('<') && !line.includes('>')) {
+      hasCommand = true;
+      return `<tool_call>\n{"name": "RunCommand", "arguments": {"command": "${escapeForJson(trimmed)}"}}\n</tool_call>`;
+    }
+    return line;
+  });
+
+  if (hasCommand) {
+    return { hasBashCommand: true, convertedText: convertedLines.join('\n') };
+  }
+
+  return { hasBashCommand: false };
+}
+
 async function extractImages(account: Account, messages: Array<{ role: string; content: unknown }>): Promise<{ messages: Array<{ role: string; content: unknown }>; medias: MimoMedia[] }> {
   const medias: MimoMedia[] = [];
   const out = await Promise.all(messages.map(async (m) => {
+    // 如果 content 不是数组，直接返回
     if (!Array.isArray(m.content)) return m;
+
+    // content 是数组，需要转换成字符串
     const blocks = m.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
-    if (!blocks.some(b => b.type === 'image_url')) return m;
     const textParts: string[] = [];
+
     for (const b of blocks) {
-      if (b.type === 'text') { textParts.push(b.text ?? ''); }
-      else if (b.type === 'image_url' && b.image_url?.url) {
+      if (b.type === 'text') {
+        textParts.push(b.text ?? '');
+      } else if (b.type === 'image_url' && b.image_url?.url) {
         const { data, mimeType } = await fetchImageBytes(b.image_url.url);
         medias.push(await uploadImageToMimo(account, data, mimeType));
       }
     }
+
+    // 始终返回字符串格式的 content
     return { role: m.role, content: textParts.join('\n') };
   }));
   return { messages: out, medias };
@@ -58,6 +106,7 @@ async function extractImages(account: Account, messages: Array<{ role: string; c
 
 function logRequest(data: {
   account_id: string;
+  api_key_id: string | null;
   model: string;
   usage: MimoUsage | null;
   status: 'success' | 'error';
@@ -65,10 +114,10 @@ function logRequest(data: {
   duration_ms: number;
 }) {
   db.prepare(
-    `INSERT INTO request_logs (id, account_id, session_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
-     VALUES (?, ?, NULL, 'openai', ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO request_logs (id, account_id, session_id, api_key_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
+     VALUES (?, ?, NULL, ?, 'openai', ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
-    uuidv4(), data.account_id, data.model,
+    uuidv4(), data.account_id, data.api_key_id, data.model,
     data.usage?.promptTokens ?? null, data.usage?.completionTokens ?? null,
     data.usage?.reasoningTokens ?? null, data.duration_ms,
     data.status, data.error ?? null, new Date().toLocaleString('sv-SE')
@@ -91,15 +140,35 @@ export function registerOpenAI(app: Hono) {
     const apiKey = authHeader.replace(/^Bearer\s+/i, '').trim();
     console.log('[REQ] Headers:', { hasAuth: !!authHeader, apiKeyPrefix: apiKey ? apiKey.slice(0, 8) + '...' : 'none', contentType: c.req.header('Content-Type') });
 
-    const account = apiKey ? getAccountByApiKey(apiKey) : getLeastBusyAccount();
-    if (!account) {
-      console.log('[REQ] ❌ No account available');
-      return c.json({ error: { message: 'Unauthorized or no active account', type: 'auth_error' } }, 401);
+    // 1. 认证检查
+    if (!apiKey) {
+      console.log('[REQ] ❌ Missing API key');
+      return c.json({ error: { message: 'Missing API key', type: 'auth_error' } }, 401);
     }
-    console.log('[REQ] ✓ Account found:', { id: account.id.slice(0, 8) + '...', alias: account.alias || 'no-alias', activeRequests: account.active_requests });
 
-    if (account.active_requests >= config.maxConcurrentPerAccount) {
+    const apiKeyRecord = validateApiKey(apiKey);
+    if (!apiKeyRecord) {
+      console.log('[REQ] ❌ Invalid API key');
+      return c.json({ error: { message: 'Invalid API key', type: 'auth_error' } }, 401);
+    }
+    console.log('[REQ] ✓ API key validated:', { id: apiKeyRecord.id.slice(0, 8) + '...', name: apiKeyRecord.name || 'unnamed' });
+
+    // 2. 负载均衡选择账号
+    const account = getLeastBusyAccount();
+    if (!account) {
+      console.log('[REQ] ❌ No active account available');
+      return c.json({ error: { message: 'No active account available', type: 'service_error' } }, 503);
+    }
+    console.log('[REQ] ✓ Account selected:', { id: account.id.slice(0, 8) + '...', alias: account.alias || 'no-alias', activeRequests: account.active_requests });
+
+    // 3. 记录 API 密钥使用
+    recordApiKeyUsage(apiKeyRecord.id);
+
+    // 4. 增加并发计数并检查限制
+    incrementActive(account.id);
+    if (account.active_requests + 1 > config.maxConcurrentPerAccount) {
       console.log('[REQ] ❌ Rate limit exceeded');
+      decrementActive(account.id);
       return c.json({ error: { message: 'Too many requests for this account', type: 'rate_limit' } }, 429);
     }
 
@@ -126,7 +195,6 @@ export function registerOpenAI(app: Hono) {
     }
 
     console.log('[REQ] 🚀 Starting request processing...');
-    incrementActive(account.id);
     let lastUsage: MimoUsage | null = null;
 
     try {
@@ -192,6 +260,12 @@ export function registerOpenAI(app: Hono) {
 
               if (chunk.type === 'text') {
                 let text = (chunk.content ?? '').replace(/\u0000/g, '');
+
+                // 调试：打印包含 toolcall 的文本
+                if (text.toLowerCase().includes('toolcall') || text.includes('<tool')) {
+                  console.log('[STREAM:DEBUG] Text chunk contains tool call marker:', text.slice(0, 200));
+                }
+
                 if (!pastThink && !thinkingStarted && text && !text.includes('<think>')) pastThink = true;
                 if (!pastThink) {
                   if (!thinkingStarted && text.includes('<think>')) { thinkingStarted = true; text = text.replace('<think>', ''); }
@@ -219,15 +293,114 @@ export function registerOpenAI(app: Hono) {
                     toolCallBuf += text;
                   } else {
                     pendingText += text;
-                    const fc1 = pendingText.indexOf('<function_calls>'), fc2 = pendingText.indexOf('<tool_call>');
-                    const fcIdx = fc1 === -1 ? fc2 : fc2 === -1 ? fc1 : Math.min(fc1, fc2);
+
+                    // 调试：记录 pendingText 的内容
+                    if (pendingText.includes('{') || pendingText.includes('action')) {
+                      console.log('[STREAM:DEBUG] pendingText contains { or action:', {
+                        length: pendingText.length,
+                        preview: pendingText.slice(Math.max(0, pendingText.length - 100))
+                      });
+                    }
+
+                    // 检测各种工具调用格式的起始位置
+                    const fc1 = pendingText.indexOf('<function_calls>');
+                    const fc2 = pendingText.indexOf('<tool_call>');
+                    const fc3 = pendingText.indexOf('<toolcall');
+
+                    // 检测直接工具名标签格式 - 使用通用模式，和解析器保持一致
+                    const directToolPattern = /<([a-z_][a-z0-9_]*)\s*>/i;
+                    const directToolMatch = pendingText.match(directToolPattern);
+                    let fc4 = -1;
+                    if (directToolMatch) {
+                      const tagName = directToolMatch[1].toLowerCase();
+                      // 排除常见的 HTML/Markdown 标签
+                      const excludedTags = ['div', 'span', 'p', 'a', 'img', 'br', 'hr', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'code', 'pre', 'blockquote', 'strong', 'em', 'b', 'i', 'u'];
+                      if (!excludedTags.includes(tagName)) {
+                        fc4 = pendingText.indexOf(directToolMatch[0]);
+                      }
+                    }
+
+                    // 检测 JSON 格式的工具调用 - 使用更宽松的检测
+                    // 支持 { 和 "action" 之间有换行和空格的情况
+                    let fc5 = -1;
+                    if (pendingText.includes('{"action"')) {
+                      fc5 = pendingText.indexOf('{"action"');
+                    } else if (pendingText.includes('{ "action"')) {
+                      fc5 = pendingText.indexOf('{ "action"');
+                    } else if (pendingText.includes('{') && pendingText.includes('"action"')) {
+                      // 检查 { 和 "action" 之间是否只有空白字符
+                      const openBrace = pendingText.indexOf('{');
+                      const actionPos = pendingText.indexOf('"action"');
+                      if (actionPos > openBrace) {
+                        const between = pendingText.slice(openBrace + 1, actionPos);
+                        // 如果之间只有空白字符（空格、换行、制表符），认为是 JSON 工具调用
+                        if (/^\s*$/.test(between)) {
+                          fc5 = openBrace;
+                        }
+                      }
+                    }
+
+                    // 检测 bash 命令代码块
+                    let fc6 = -1;
+                    const bashBlockIdx = pendingText.indexOf('```bash');
+                    const shBlockIdx = pendingText.indexOf('```sh');
+                    const shellBlockIdx = pendingText.indexOf('```shell');
+                    if (bashBlockIdx !== -1) fc6 = bashBlockIdx;
+                    else if (shBlockIdx !== -1) fc6 = shBlockIdx;
+                    else if (shellBlockIdx !== -1) fc6 = shellBlockIdx;
+
+                    if (fc5 !== -1) {
+                      console.log('[STREAM:DEBUG] Detected JSON tool call at position:', fc5, 'pendingText length:', pendingText.length);
+                    }
+                    if (fc6 !== -1) {
+                      console.log('[STREAM:DEBUG] Detected bash code block at position:', fc6, 'pendingText length:', pendingText.length);
+                    }
+
+                    const fcIdx = [fc1, fc2, fc3, fc4, fc5, fc6].filter(i => i !== -1).sort((a, b) => a - b)[0] ?? -1;
                     if (fcIdx !== -1) {
-                      const before = pendingText.slice(0, fcIdx);
-                      if (before) await sendDelta({ content: before });
-                      toolCallBuf = pendingText.slice(fcIdx);
+                      let before = pendingText.slice(0, fcIdx);
+                      let toolCallStart = pendingText.slice(fcIdx);
+
+                      console.log('[STREAM:DEBUG] Tool call detected, before length:', before.length, 'preview:', before.slice(-50));
+
+                      // 如果是 JSON 格式（fc5），检查前面是否有 ```json 标记
+                      if (fcIdx === fc5 && before.endsWith('```json\n')) {
+                        // 将 ```json\n 也包含到 toolCallBuf 中，这样可以在解析时识别并去除
+                        const markdownStart = before.lastIndexOf('```json\n');
+                        before = pendingText.slice(0, markdownStart);
+                        toolCallStart = pendingText.slice(markdownStart);
+                        console.log('[STREAM:DEBUG] Adjusted for ```json marker, new before length:', before.length);
+                      } else if (fcIdx === fc5 && before.match(/```json\s*$/)) {
+                        // 处理 ```json 后面可能有空格的情况
+                        const match = before.match(/(```json\s*)$/);
+                        if (match) {
+                          const markdownStart = before.length - match[1].length;
+                          before = pendingText.slice(0, markdownStart);
+                          toolCallStart = pendingText.slice(markdownStart);
+                          console.log('[STREAM:DEBUG] Adjusted for ```json marker (with spaces), new before length:', before.length);
+                        }
+                      }
+
+                      if (before) {
+                        console.log('[STREAM:DEBUG] Sending before text:', before);
+                        await sendDelta({ content: before });
+                      }
+                      toolCallBuf = toolCallStart;
                       pendingText = '';
+                      console.log('[STREAM:DEBUG] Started toolCallBuf, length:', toolCallBuf.length, 'preview:', toolCallBuf.slice(0, 100));
                     } else {
-                      const safe = pendingText.slice(0, Math.max(0, pendingText.length - 15));
+                      // 增加 safe buffer 大小，避免 ```json 被分割
+                      // 如果 pendingText 包含 ``` 但还没有完整的工具调用标记，保留更多字符
+                      let safeBufferSize = 15;
+                      if (pendingText.includes('```') && !pendingText.includes('```\n')) {
+                        // 可能是 ```json 的开始，保留更多
+                        safeBufferSize = 30;
+                      } else if (pendingText.match(/```\w*$/)) {
+                        // 以 ``` 或 ```j 等结尾，保留整个 pendingText
+                        safeBufferSize = pendingText.length;
+                      }
+
+                      const safe = pendingText.slice(0, Math.max(0, pendingText.length - safeBufferSize));
                       if (safe) await sendDelta({ content: safe });
                       pendingText = pendingText.slice(safe.length);
                     }
@@ -246,6 +419,13 @@ export function registerOpenAI(app: Hono) {
                   else await sendDelta({ content: pendingText });
                   pendingText = '';
                 }
+
+                console.log('[STREAM:DEBUG] Finish event, toolCallBuf:', toolCallBuf ? toolCallBuf.slice(0, 500) : 'null');
+                if (toolCallBuf) {
+                  console.log('[STREAM:DEBUG] toolCallBuf full length:', toolCallBuf.length);
+                  console.log('[STREAM:DEBUG] hasToolCallMarker:', hasToolCallMarker(toolCallBuf));
+                }
+
                 const usageChunk = lastUsage ? {
                   prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens,
                   total_tokens: lastUsage.totalTokens, completion_tokens_details: { reasoning_tokens: lastUsage.reasoningTokens },
@@ -257,6 +437,36 @@ export function registerOpenAI(app: Hono) {
                     finishReason = 'tool_calls';
                     await sendDelta({ tool_calls: toOpenAIToolCalls(calls).map((tc, i) => ({ index: i, ...tc })) });
                   } else {
+                    // 解析失败，但有工具调用标记，可能是格式问题
+                    // 尝试提取工具调用之前的文本
+                    const toolCallStart = Math.min(
+                      toolCallBuf.indexOf('<toolcall') !== -1 ? toolCallBuf.indexOf('<toolcall') : Infinity,
+                      toolCallBuf.indexOf('<tool_call') !== -1 ? toolCallBuf.indexOf('<tool_call') : Infinity,
+                      toolCallBuf.indexOf('<function_calls>') !== -1 ? toolCallBuf.indexOf('<function_calls>') : Infinity
+                    );
+                    if (toolCallStart !== Infinity && toolCallStart > 0) {
+                      // 有工具调用之前的文本，发送它
+                      await sendDelta({ content: toolCallBuf.slice(0, toolCallStart) });
+                    } else {
+                      // 没有找到工具调用起始位置，发送全部内容
+                      await sendDelta({ content: toolCallBuf });
+                    }
+                  }
+                } else if (toolCallBuf) {
+                  // toolCallBuf 存在但没有工具调用标记，可能是 bash 命令
+                  const bashDetection = detectAndConvertBashCommands(toolCallBuf);
+                  if (bashDetection.hasBashCommand && bashDetection.convertedText) {
+                    console.log('[STREAM:DEBUG] Detected bash command, converting to tool call');
+                    const calls = parseToolCalls(bashDetection.convertedText);
+                    if (calls.length > 0) {
+                      finishReason = 'tool_calls';
+                      await sendDelta({ tool_calls: toOpenAIToolCalls(calls).map((tc, i) => ({ index: i, ...tc })) });
+                    } else {
+                      // 转换失败，发送原始内容
+                      await sendDelta({ content: toolCallBuf });
+                    }
+                  } else {
+                    // 不是 bash 命令，发送原始内容
                     await sendDelta({ content: toolCallBuf });
                   }
                 }
@@ -270,11 +480,11 @@ export function registerOpenAI(app: Hono) {
             if (!isAborted) {
               try { await s.write(`data: ${JSON.stringify({ error: { message: String(err), type: 'api_error' } })}\n\n`); await s.write('data: [DONE]\n\n'); } catch {}
             }
-            logRequest({ account_id: account.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
           }
 
           if (!isAborted) {
-            logRequest({ account_id: account.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
             // 更新会话 token 统计
             if (lastUsage) {
               updateSessionTokens(session.id, lastUsage.promptTokens);
@@ -290,9 +500,9 @@ export function registerOpenAI(app: Hono) {
         if (chunk.type === 'text') fullText += chunk.content ?? '';
         else if (chunk.type === 'usage') lastUsage = chunk.usage!;
       }
-      
+
       fullText = processThinkContent(fullText, config.thinkMode);
-      logRequest({ account_id: account.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
       // 更新会话 token 统计
       if (lastUsage) {
         updateSessionTokens(session.id, lastUsage.promptTokens);
@@ -321,7 +531,7 @@ export function registerOpenAI(app: Hono) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('401') || msg.includes('403')) markAccountInactive(account.id);
-      logRequest({ account_id: account.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
       return c.json({ error: { message: msg, type: 'api_error' } }, 502);
     } finally {
       decrementActive(account.id);

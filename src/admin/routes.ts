@@ -5,6 +5,10 @@ import {
   updateAccount, deleteAccount, parseCurl,
   getAccountByApiKey
 } from '../accounts.js';
+import {
+  listApiKeys, createApiKey, getApiKeyById,
+  updateApiKey, deleteApiKey
+} from '../api-keys.js';
 import { listSessions, deleteSession } from '../mimo/session.js';
 import { db } from '../db.js';
 import { callMimo } from '../mimo/client.js';
@@ -24,7 +28,18 @@ export function registerAdmin(app: Hono) {
 
   // --- Accounts ---
   admin.get('/accounts', (c) => {
-    return c.json(listAccounts());
+    const accounts = db.prepare(`
+      SELECT a.id, a.alias, a.user_id, a.service_token, a.ph_token, a.api_key,
+             a.is_active, a.active_requests, a.created_at,
+             COALESCE(COUNT(l.id), 0) as total_requests,
+             COALESCE(SUM(l.prompt_tokens), 0) as total_prompt_tokens,
+             COALESCE(SUM(l.completion_tokens), 0) as total_completion_tokens
+      FROM accounts a
+      LEFT JOIN request_logs l ON a.id = l.account_id
+      GROUP BY a.id
+      ORDER BY a.created_at DESC
+    `).all();
+    return c.json(accounts);
   });
 
   admin.post('/accounts', async (c) => {
@@ -132,7 +147,65 @@ export function registerAdmin(app: Hono) {
       LEFT JOIN request_logs l ON a.id = l.account_id
       GROUP BY a.id
     `).all();
-    return c.json({ accounts });
+    return c.json({ accounts, maxConcurrent: config.maxConcurrentPerAccount });
+  });
+
+  admin.get('/stats/api-keys', (c) => {
+    const apiKeys = db.prepare(`
+      SELECT k.id, k.key, k.name, k.is_active, k.request_count, k.last_used_at,
+             COALESCE(COUNT(l.id), 0) as total_requests,
+             COALESCE(SUM(l.prompt_tokens), 0) as total_prompt_tokens,
+             COALESCE(SUM(l.completion_tokens), 0) as total_completion_tokens
+      FROM api_keys k
+      LEFT JOIN request_logs l ON k.id = l.api_key_id
+      GROUP BY k.id
+      ORDER BY k.created_at DESC
+    `).all();
+    return c.json({ apiKeys });
+  });
+
+  // --- API Keys ---
+  admin.get('/api-keys', (c) => {
+    return c.json({ keys: listApiKeys() });
+  });
+
+  admin.post('/api-keys', async (c) => {
+    const body = await c.req.json();
+    const apiKey = createApiKey(body.name);
+    return c.json(apiKey, 201);
+  });
+
+  admin.patch('/api-keys/:id', async (c) => {
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const apiKey = getApiKeyById(id);
+    if (!apiKey) return c.json({ error: 'Not found' }, 404);
+    updateApiKey(id, { name: body.name, is_active: body.is_active });
+    return c.json({ message: 'Updated' });
+  });
+
+  admin.delete('/api-keys/:id', (c) => {
+    const id = c.req.param('id');
+    const apiKey = getApiKeyById(id);
+    if (!apiKey) return c.json({ error: 'Not found' }, 404);
+    deleteApiKey(id);
+    return c.json({ message: 'Deleted' });
+  });
+
+  admin.get('/api-keys/:id/stats', (c) => {
+    const id = c.req.param('id');
+    const apiKey = getApiKeyById(id);
+    if (!apiKey) return c.json({ error: 'Not found' }, 404);
+
+    const stats = db.prepare(`
+      SELECT COUNT(*) as total_requests,
+             COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
+             COALESCE(SUM(completion_tokens), 0) as total_completion_tokens
+      FROM request_logs
+      WHERE api_key_id = ?
+    `).get(id);
+
+    return c.json({ ...apiKey, stats });
   });
 
   app.route('/admin', admin);
