@@ -13,6 +13,26 @@ import { listSessions, deleteSession } from '../mimo/session.js';
 import { db } from '../db.js';
 import { callMimo } from '../mimo/client.js';
 import { v4 as uuidv4 } from 'uuid';
+import { readFileSync, writeFileSync } from 'fs';
+import { resolve } from 'path';
+
+function updateEnvFile(updates: Record<string, string>) {
+  const envPath = resolve(process.cwd(), '.env');
+  let content = '';
+  try { content = readFileSync(envPath, 'utf-8'); } catch {}
+  const lines = content.split('\n');
+  const written = new Set<string>();
+  const result = lines.map(line => {
+    const m = line.match(/^([A-Z_][A-Z0-9_]*)=/);
+    if (m && m[1] in updates) { written.add(m[1]); return `${m[1]}=${updates[m[1]]}`; }
+    return line;
+  });
+  for (const [k, v] of Object.entries(updates)) {
+    if (!written.has(k)) result.push(`${k}=${v}`);
+  }
+  while (result.length > 0 && result[result.length - 1] === '') result.pop();
+  writeFileSync(envPath, result.join('\n') + '\n');
+}
 
 async function adminAuth(c: Parameters<Parameters<Hono['use']>[1]>[0], next: () => Promise<void>): Promise<void | Response> {
   const key = c.req.header('X-Admin-Key') ?? c.req.query('admin_key');
@@ -206,6 +226,56 @@ export function registerAdmin(app: Hono) {
     `).get(id);
 
     return c.json({ ...apiKey, stats });
+  });
+
+  // --- Config ---
+  admin.get('/config', (c) => {
+    return c.json({
+      port: config.port,
+      maxReplayMessages: config.maxReplayMessages,
+      maxQueryChars: config.maxQueryChars,
+      contextResetThreshold: config.contextResetThreshold,
+      maxConcurrentPerAccount: config.maxConcurrentPerAccount,
+      thinkMode: config.thinkMode,
+      sessionTtlDays: config.sessionTtlDays,
+      sessionIsolation: config.sessionIsolation,
+    });
+  });
+
+  admin.patch('/config', async (c) => {
+    const body = await c.req.json();
+    const envUpdates: Record<string, string> = {};
+    const envKeyMap: Record<string, string> = {
+      maxReplayMessages: 'MAX_REPLAY_MESSAGES',
+      maxQueryChars: 'MAX_QUERY_CHARS',
+      contextResetThreshold: 'CONTEXT_RESET_THRESHOLD',
+      maxConcurrentPerAccount: 'MAX_CONCURRENT_PER_ACCOUNT',
+      sessionTtlDays: 'SESSION_TTL_DAYS',
+      thinkMode: 'THINK_MODE',
+      sessionIsolation: 'SESSION_ISOLATION',
+    };
+    const numericKeys = ['maxReplayMessages', 'maxQueryChars', 'contextResetThreshold', 'maxConcurrentPerAccount', 'sessionTtlDays'];
+    for (const key of numericKeys) {
+      if (body[key] !== undefined) {
+        const v = Number(body[key]);
+        if (v > 0) {
+          (config as Record<string, unknown>)[key] = v;
+          envUpdates[envKeyMap[key]] = String(v);
+        }
+      }
+    }
+    if (body.thinkMode && ['passthrough', 'strip', 'separate'].includes(body.thinkMode)) {
+      (config as Record<string, unknown>).thinkMode = body.thinkMode;
+      envUpdates.THINK_MODE = body.thinkMode;
+    }
+    if (body.sessionIsolation && ['manual', 'auto', 'per-request'].includes(body.sessionIsolation)) {
+      (config as Record<string, unknown>).sessionIsolation = body.sessionIsolation;
+      envUpdates.SESSION_ISOLATION = body.sessionIsolation;
+    }
+    if (Object.keys(envUpdates).length > 0) {
+      try { updateEnvFile(envUpdates); } catch {}
+    }
+    return c.json({ message: 'Config updated' });
   });
 
   app.route('/admin', admin);

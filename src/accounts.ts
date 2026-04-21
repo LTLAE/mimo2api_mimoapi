@@ -46,6 +46,18 @@ export function getLeastBusyAccount(): Account | undefined {
   ).get() as Account | undefined;
 }
 
+export function acquireAccount(maxConcurrent: number): Account | undefined {
+  const txn = db.transaction(() => {
+    const account = db.prepare(
+      'SELECT * FROM accounts WHERE is_active = 1 AND active_requests < ? ORDER BY active_requests ASC LIMIT 1'
+    ).get(maxConcurrent) as Account | undefined;
+    if (!account) return undefined;
+    db.prepare('UPDATE accounts SET active_requests = active_requests + 1 WHERE id = ?').run(account.id);
+    return { ...account, active_requests: account.active_requests + 1 };
+  });
+  return txn();
+}
+
 export function incrementActive(id: string) {
   db.prepare('UPDATE accounts SET active_requests = active_requests + 1 WHERE id = ?').run(id);
 }

@@ -1,18 +1,17 @@
 import { Hono } from 'hono';
 import { stream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
-import { getLeastBusyAccount, incrementActive, decrementActive, markAccountInactive } from '../accounts.js';
-import { validateApiKey, recordApiKeyUsage } from '../api-keys.js';
+import { decrementActive } from '../accounts.js';
 import { callMimo, MimoUsage } from '../mimo/client.js';
 import { serializeMessages, ChatMessage } from '../mimo/serialize.js';
 import { config } from '../config.js';
-import { db } from '../db.js';
 import { buildToolSystemPrompt, ToolDefinition } from '../tools/prompt.js';
 import { parseToolCalls, hasToolCallMarker } from '../tools/parser.js';
 import { toOpenAIToolCalls } from '../tools/format.js';
 import { uploadImageToMimo, fetchImageBytes, MimoMedia } from '../mimo/upload.js';
 import { Account } from '../accounts.js';
 import { getOrCreateSession, updateSessionTokens } from '../mimo/session.js';
+import { extractApiKey, authenticateRequest, acquireAccountForRequest, logApiRequest, handleAccountError } from '../middleware/request-handler.js';
 import { generateClientSessionId } from '../mimo/session-marker.js';
 
 const MODEL_MAP: Record<string, string> = {
@@ -113,15 +112,7 @@ function logRequest(data: {
   error?: string;
   duration_ms: number;
 }) {
-  db.prepare(
-    `INSERT INTO request_logs (id, account_id, session_id, api_key_id, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens, duration_ms, status, error, created_at)
-     VALUES (?, ?, NULL, ?, 'openai', ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    uuidv4(), data.account_id, data.api_key_id, data.model,
-    data.usage?.promptTokens ?? null, data.usage?.completionTokens ?? null,
-    data.usage?.reasoningTokens ?? null, data.duration_ms,
-    data.status, data.error ?? null, new Date().toLocaleString('sv-SE')
-  );
+  logApiRequest({ ...data, endpoint: 'openai' });
 }
 
 export function registerOpenAI(app: Hono) {
@@ -136,41 +127,20 @@ export function registerOpenAI(app: Hono) {
     console.log('[REQ] Method:', c.req.method, 'Path:', c.req.path);
 
     const startTime = Date.now();
-    const authHeader = c.req.header('Authorization') ?? '';
-    const apiKey = authHeader.replace(/^Bearer\s+/i, '').trim();
-    console.log('[REQ] Headers:', { hasAuth: !!authHeader, apiKeyPrefix: apiKey ? apiKey.slice(0, 8) + '...' : 'none', contentType: c.req.header('Content-Type') });
+    const apiKey = extractApiKey(c);
 
     // 1. 认证检查
-    if (!apiKey) {
-      console.log('[REQ] ❌ Missing API key');
-      return c.json({ error: { message: 'Missing API key', type: 'auth_error' } }, 401);
-    }
-
-    const apiKeyRecord = validateApiKey(apiKey);
+    const apiKeyRecord = authenticateRequest(apiKey);
     if (!apiKeyRecord) {
-      console.log('[REQ] ❌ Invalid API key');
-      return c.json({ error: { message: 'Invalid API key', type: 'auth_error' } }, 401);
+      return c.json({ error: { message: apiKey ? 'Invalid API key' : 'Missing API key', type: 'auth_error' } }, 401);
     }
-    console.log('[REQ] ✓ API key validated:', { id: apiKeyRecord.id.slice(0, 8) + '...', name: apiKeyRecord.name || 'unnamed' });
 
-    // 2. 负载均衡选择账号
-    const account = getLeastBusyAccount();
-    if (!account) {
-      console.log('[REQ] ❌ No active account available');
+    // 2. 原子性选择账号并递增并发计数
+    const acquired = acquireAccountForRequest(apiKeyRecord);
+    if (!acquired) {
       return c.json({ error: { message: 'No active account available', type: 'service_error' } }, 503);
     }
-    console.log('[REQ] ✓ Account selected:', { id: account.id.slice(0, 8) + '...', alias: account.alias || 'no-alias', activeRequests: account.active_requests });
-
-    // 3. 记录 API 密钥使用
-    recordApiKeyUsage(apiKeyRecord.id);
-
-    // 4. 增加并发计数并检查限制
-    incrementActive(account.id);
-    if (account.active_requests + 1 > config.maxConcurrentPerAccount) {
-      console.log('[REQ] ❌ Rate limit exceeded');
-      decrementActive(account.id);
-      return c.json({ error: { message: 'Too many requests for this account', type: 'rate_limit' } }, 429);
-    }
+    const { account } = acquired;
 
     const body = await c.req.json();
     console.log('[REQ] Body parsed:', { model: body.model || 'default', stream: body.stream ?? false, messages: body.messages?.length || 0, tools: body.tools?.length || 0, reasoning: !!body.reasoning_effort });
@@ -229,6 +199,7 @@ export function registerOpenAI(app: Hono) {
         return stream(c, async (s) => {
           let isAborted = false;
           let chunkCount = 0;
+          let loggedError = false;
 
           const req = c.req.raw as any;
           if (req.on) {
@@ -481,9 +452,12 @@ export function registerOpenAI(app: Hono) {
               try { await s.write(`data: ${JSON.stringify({ error: { message: String(err), type: 'api_error' } })}\n\n`); await s.write('data: [DONE]\n\n'); } catch {}
             }
             logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: String(err), duration_ms: Date.now() - startTime });
+            loggedError = true;
+          } finally {
+            decrementActive(account.id);
           }
 
-          if (!isAborted) {
+          if (!isAborted && !loggedError) {
             logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
             // 更新会话 token 统计
             if (lastUsage) {
@@ -530,11 +504,11 @@ export function registerOpenAI(app: Hono) {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('401') || msg.includes('403')) markAccountInactive(account.id);
+      handleAccountError(account, msg);
       logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
       return c.json({ error: { message: msg, type: 'api_error' } }, 502);
     } finally {
-      decrementActive(account.id);
+      if (!isStream) decrementActive(account.id);
     }
   });
 }
