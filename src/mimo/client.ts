@@ -110,6 +110,7 @@ export async function* callMimo(
             };
           } else if (event === 'finish') {
             yield { type: 'finish' };
+            return;
           } else if (event === 'dialogId') {
             yield { type: 'dialogId', content: data.content };
           }

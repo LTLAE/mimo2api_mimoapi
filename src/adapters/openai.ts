@@ -37,6 +37,127 @@ function processThinkContent(text: string, mode: string): string {
   return text;
 }
 
+function normalizeRole(role: string): ChatMessage['role'] {
+  if (role === 'developer') return 'system';
+  if (role === 'assistant' || role === 'tool' || role === 'system') return role;
+  return 'user';
+}
+
+function buildCompletionQuery(body: Record<string, unknown>): string {
+  const prompt = typeof body.prompt === 'string'
+    ? body.prompt
+    : Array.isArray(body.prompt)
+      ? body.prompt.map(p => typeof p === 'string' ? p : JSON.stringify(p)).join('\n')
+      : '';
+  const suffix = typeof body.suffix === 'string' ? body.suffix : '';
+
+  if (!prompt.trim() && !suffix.trim()) return '';
+
+  return [
+    '你是代码补全引擎。根据光标前后的代码上下文，补全光标处应插入的代码。',
+    '只输出光标处要插入的原始代码。',
+    '不要输出思考过程、分析、解释、Markdown 代码块，也不要复述这些要求。',
+    '',
+    '[光标前代码]',
+    prompt,
+    '',
+    '[光标后代码]',
+    suffix,
+  ].join('\n').trim();
+}
+
+function getCompletionChoiceCount(): number {
+  return 1;
+}
+
+function combineUsage(a: MimoUsage | null, b: MimoUsage | null): MimoUsage | null {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+    reasoningTokens: a.reasoningTokens + b.reasoningTokens,
+  };
+}
+
+function sanitizeCompletionText(text: string): string {
+  let cleaned = stripThink(text);
+  cleaned = cleaned.replace(/```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)\n```/g, '$1');
+
+  const lines = cleaned.split(/\r?\n/);
+  while (lines.length > 0) {
+    const line = lines[0].trim();
+    if (!line) {
+      lines.shift();
+      continue;
+    }
+    if (/^(用户要求|我需要|我会|我将|首先|接下来|因此|这里|可以|应该)/.test(line)) {
+      lines.shift();
+      continue;
+    }
+    if (/(代码补全引擎|光标前后|只输出|不要输出|Markdown|思考过程|分析|解释|复述这些要求)/.test(line)) {
+      lines.shift();
+      continue;
+    }
+    break;
+  }
+
+  return lines.join('\n').trimStart();
+}
+
+async function collectCompletion(
+  account: Account,
+  query: string,
+  model: string,
+  index: number
+): Promise<{ text: string; usage: MimoUsage | null }> {
+  let fullText = '';
+  let usage: MimoUsage | null = null;
+  const conversationId = uuidv4().replace(/-/g, '');
+  const startedAt = Date.now();
+  const gen = callMimo(account, conversationId, query, false, model, []);
+
+  try {
+    for await (const chunk of gen) {
+      if (chunk.type === 'text') fullText += chunk.content ?? '';
+      else if (chunk.type === 'usage') usage = chunk.usage!;
+      else if (chunk.type === 'finish') break;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[COMPLETION] Candidate failed:', {
+      index,
+      duration_ms: Date.now() - startedAt,
+      error: msg
+    });
+  }
+
+  const text = sanitizeCompletionText(fullText);
+  console.log('[COMPLETION] Candidate done:', {
+    index,
+    duration_ms: Date.now() - startedAt,
+    textLength: text.length
+  });
+  return { text, usage };
+}
+
+function normalizeOpenAIChatMessages(body: Record<string, unknown>): Array<{ role: string; content: unknown }> {
+  if (Array.isArray(body.messages) && body.messages.length > 0) {
+    return (body.messages as Array<{ role?: string; content?: unknown }>).map(m => ({
+      role: normalizeRole(m.role ?? 'user'),
+      content: m.content ?? '',
+    }));
+  }
+
+  const completionQuery = buildCompletionQuery(body);
+  if (completionQuery) {
+    return [{ role: 'user', content: completionQuery }];
+  }
+
+  return [];
+}
+
 // 转义字符串用于 JSON
 function escapeForJson(str: string): string {
   return str
@@ -85,15 +206,21 @@ async function extractImages(account: Account, messages: Array<{ role: string; c
     if (!Array.isArray(m.content)) return m;
 
     // content 是数组，需要转换成字符串
-    const blocks = m.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    const blocks = m.content as Array<{ type: string; text?: string; image_url?: { url: string }; image?: { url?: string }; source?: { url?: string } }>;
     const textParts: string[] = [];
 
     for (const b of blocks) {
-      if (b.type === 'text') {
+      if (b.type === 'text' || b.type === 'input_text') {
         textParts.push(b.text ?? '');
       } else if (b.type === 'image_url' && b.image_url?.url) {
         const { data, mimeType } = await fetchImageBytes(b.image_url.url);
         medias.push(await uploadImageToMimo(account, data, mimeType));
+      } else if ((b.type === 'image' || b.type === 'input_image') && (b.image?.url || b.source?.url)) {
+        const imageUrl = b.image?.url ?? b.source?.url;
+        if (imageUrl) {
+          const { data, mimeType } = await fetchImageBytes(imageUrl);
+          medias.push(await uploadImageToMimo(account, data, mimeType));
+        }
       }
     }
 
@@ -121,6 +248,101 @@ export function registerOpenAI(app: Hono) {
     return c.json({ object: 'list', data: models });
   });
 
+  app.post('/v1/completions', async (c) => {
+    console.log('\n[REQ] ========== New OpenAI Completion Request ==========');
+    console.log('[REQ] Time:', new Date().toISOString());
+    console.log('[REQ] Method:', c.req.method, 'Path:', c.req.path);
+
+    const startTime = Date.now();
+    const apiKey = extractApiKey(c);
+
+    const apiKeyRecord = authenticateRequest(apiKey);
+    if (!apiKeyRecord) {
+      return c.json({ error: { message: apiKey ? 'Invalid API key' : 'Missing API key', type: 'auth_error' } }, 401);
+    }
+
+    const acquired = acquireAccountForRequest(apiKeyRecord);
+    if (!acquired) {
+      return c.json({ error: { message: 'No active account available', type: 'service_error' } }, 503);
+    }
+    const { account } = acquired;
+    const body = await c.req.json();
+    const mimoModel = resolveModel(body.model ?? '');
+    const isStream: boolean = body.stream ?? false;
+    const choiceCount = getCompletionChoiceCount();
+    let streamStarted = false;
+    let lastUsage: MimoUsage | null = null;
+
+    try {
+      const query = buildCompletionQuery(body);
+      if (!query.trim()) {
+        return c.json({ error: { message: 'Empty completion request: prompt or suffix is required', type: 'invalid_request_error' } }, 400);
+      }
+
+      const responseId = `cmpl-${uuidv4().replace(/-/g, '')}`;
+      const created = Math.floor(Date.now() / 1000);
+
+      const completionChoices: Array<{ text: string; index: number; logprobs: null; finish_reason: 'stop' }> = [];
+      const results = await Promise.all(
+        Array.from({ length: choiceCount }, (_, i) => collectCompletion(account, query, mimoModel, i))
+      );
+      for (const [i, result] of results.entries()) {
+        lastUsage = combineUsage(lastUsage, result.usage);
+        completionChoices.push({ text: result.text, index: i, logprobs: null, finish_reason: 'stop' });
+      }
+
+      if (isStream) {
+        c.header('Content-Type', 'text/event-stream');
+        c.header('Cache-Control', 'no-cache');
+        c.header('X-Accel-Buffering', 'no');
+        streamStarted = true;
+        return stream(c, async (s) => {
+          let loggedError = false;
+          try {
+            const usageObj = lastUsage ? {
+              prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens,
+              total_tokens: lastUsage.totalTokens, completion_tokens_details: { reasoning_tokens: lastUsage.reasoningTokens },
+            } : undefined;
+            await s.write(`data: ${JSON.stringify({ id: responseId, object: 'text_completion', created, model: mimoModel, choices: completionChoices, usage: usageObj })}\n\n`);
+            await s.write('data: [DONE]\n\n');
+          } catch (err) {
+            loggedError = true;
+            const msg = err instanceof Error ? err.message : String(err);
+            handleAccountError(account, msg);
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+            try { await s.write(`data: ${JSON.stringify({ error: { message: msg, type: 'api_error' } })}\n\n`); await s.write('data: [DONE]\n\n'); } catch {}
+          } finally {
+            decrementActive(account.id);
+          }
+
+          if (!loggedError) {
+            logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+          }
+        });
+      }
+
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: lastUsage, status: 'success', duration_ms: Date.now() - startTime });
+
+      const usageObj = lastUsage ? {
+        prompt_tokens: lastUsage.promptTokens, completion_tokens: lastUsage.completionTokens,
+        total_tokens: lastUsage.totalTokens, completion_tokens_details: { reasoning_tokens: lastUsage.reasoningTokens },
+      } : undefined;
+
+      return c.json({
+        id: responseId, object: 'text_completion', created, model: mimoModel,
+        choices: completionChoices,
+        usage: usageObj,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      handleAccountError(account, msg);
+      logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
+      return c.json({ error: { message: msg, type: 'api_error' } }, 502);
+    } finally {
+      if (!isStream || !streamStarted) decrementActive(account.id);
+    }
+  });
+
   app.post('/v1/chat/completions', async (c) => {
     console.log('\n[REQ] ========== New OpenAI Request ==========');
     console.log('[REQ] Time:', new Date().toISOString());
@@ -145,7 +367,8 @@ export function registerOpenAI(app: Hono) {
     const body = await c.req.json();
     console.log('[REQ] Body parsed:', { model: body.model || 'default', stream: body.stream ?? false, messages: body.messages?.length || 0, tools: body.tools?.length || 0, reasoning: !!body.reasoning_effort });
 
-    const { messages: cleanedMsgs, medias } = await extractImages(account, body.messages ?? []);
+    const normalizedMessages = normalizeOpenAIChatMessages(body);
+    const { messages: cleanedMsgs, medias } = await extractImages(account, normalizedMessages);
     const rawMessages: ChatMessage[] = cleanedMsgs as ChatMessage[];
     const tools: ToolDefinition[] | undefined = body.tools?.length ? body.tools : undefined;
     const isStream: boolean = body.stream ?? false;
@@ -165,6 +388,7 @@ export function registerOpenAI(app: Hono) {
     }
 
     console.log('[REQ] 🚀 Starting request processing...');
+    let streamStarted = false;
     let lastUsage: MimoUsage | null = null;
 
     try {
@@ -187,6 +411,10 @@ export function registerOpenAI(app: Hono) {
       const query = serializeMessages(messages);
       console.log('[MIMO] Calling MiMo API...', { model: mimoModel, thinking: enableThinking, queryLength: query.length, hasMedia: medias.length > 0 });
 
+      if (!query.trim() && medias.length === 0) {
+        return c.json({ error: { message: 'Empty chat completion request: no messages, prompt, suffix, or media content found', type: 'invalid_request_error' } }, 400);
+      }
+
       const gen = callMimo(account, conversationId, query, enableThinking, mimoModel, medias);
       const responseId = `chatcmpl-${uuidv4().replace(/-/g, '')}`;
       const created = Math.floor(Date.now() / 1000);
@@ -196,6 +424,7 @@ export function registerOpenAI(app: Hono) {
         c.header('Content-Type', 'text/event-stream');
         c.header('Cache-Control', 'no-cache');
         c.header('X-Accel-Buffering', 'no');
+        streamStarted = true;
         return stream(c, async (s) => {
           let isAborted = false;
           let chunkCount = 0;
@@ -508,7 +737,7 @@ export function registerOpenAI(app: Hono) {
       logRequest({ account_id: account.id, api_key_id: apiKeyRecord.id, model: mimoModel, usage: null, status: 'error', error: msg, duration_ms: Date.now() - startTime });
       return c.json({ error: { message: msg, type: 'api_error' } }, 502);
     } finally {
-      if (!isStream) decrementActive(account.id);
+      if (!isStream || !streamStarted) decrementActive(account.id);
     }
   });
 }
