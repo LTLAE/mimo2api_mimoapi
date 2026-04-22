@@ -4,7 +4,8 @@
 
 ## 功能特性
 
-- 兼容 OpenAI `v1/chat/completions` 接口（支持流式 & 非流式）
+- ~~兼容 OpenAI `v1/chat/completions` 接口（支持流式 & 非流式）~~ This endpoint of original project have a problem that completions could not work. Fixed.
+- Support OpenAI `v1/completions` API (Stream & non Stream) but it could be very slow (around 30000-50000 ms per completion).
 - 兼容 Anthropic `v1/messages` 接口（支持流式 & 非流式）
 - **图片理解**：支持 OpenAI `image_url` 和 Anthropic `image` 多模态内容块（自动上传至小米 OSS）
 - **多账号负载均衡**：自动选择最空闲账号，提升并发能力
